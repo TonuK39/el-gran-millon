@@ -17,7 +17,7 @@ const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.f
 export function defaultSettings() {
   return {
     team: '', cats: CATEGORIES.map(c => c.id), len: 15, time: 30, diff: 'normal', safe: 'clasico',
-    theme: 'gala', pub: false, customMode: 'off', customCount: 0,
+    theme: 'gala', pub: false, customMode: 'off', customCount: 0, mode: 'coop',
   };
 }
 
@@ -98,6 +98,9 @@ export class Engine {
       this.t.finalAt = tm.final != null ? now + tm.final : 0;
       this.t.phaseEnd = tm.phase != null ? now + tm.phase : now + 1500;
       this.seq = Math.max(0, ...(state.evs || []).map(e => e.seq));
+      this.pAns = {};
+      if (g.comp) for (const [pid, P] of Object.entries(g.comp.p)) if (P.q) this.pAns[pid] = this.lookupAnswer(P.q);
+      this.t.votingStart = now - Math.max(0, (tm.total || 0) - (tm.left || 0));
     }
     this.push();
   }
@@ -161,7 +164,7 @@ export class Engine {
       this.event('join', m.id);
     }
     if (s.phase === 'lobby') s.players = s.players.filter(p => p.online);
-    if (s.phase === 'voting') this.checkAllVoted(false);
+    if (s.phase === 'voting') { if (this.isComp()) this.compCheck(); else this.checkAllVoted(false); }
     this.push();
   }
 
@@ -193,8 +196,8 @@ export class Engine {
       }
       case 'settings': if (!isHost || s.phase !== 'lobby') return null; this.applySettings(a.patch || {}); break;
       case 'start': if (!isHost || s.phase !== 'lobby') return null; err = this.start(); break;
-      case 'vote': this.vote(p, a.o); break;
-      case 'life': this.useLife(p, a.role); break;
+      case 'vote': if (this.isComp()) this.compVote(p, a.o); else this.vote(p, a.o); break;
+      case 'life': if (this.isComp()) this.compLife(p, a.role); else this.useLife(p, a.role); break;
       case 'lobby':
         if (!isHost || s.phase !== 'over') return null;
         s.phase = 'lobby'; s.game = null;
@@ -218,6 +221,7 @@ export class Engine {
     if (['clasico', 'uno', 'ninguno'].includes(patch.safe)) st.safe = patch.safe;
     if (THEMES[patch.theme]) st.theme = patch.theme;
     if (typeof patch.pub === 'boolean') st.pub = patch.pub;
+    if (['coop', 'comp'].includes(patch.mode)) st.mode = patch.mode;
     if (['off', 'mix', 'only'].includes(patch.customMode)) st.customMode = this.custom.list.length ? patch.customMode : 'off';
   }
 
@@ -242,6 +246,7 @@ export class Engine {
     if (st.customMode !== 'only' && !st.cats.length) return 'Elige al menos un tema.';
     if (st.customMode !== 'only' && !this.bank.loaded) return 'Las preguntas aún se están cargando.';
     s.players = s.players.filter(p => p.online);
+    if (st.mode === 'comp' && s.players.length < 2) return 'El modo competitivo necesita al menos 2 jugadores.';
     this.used = new Set();
     s.game = {
       id: rid(), n: 0, len: st.len, ladder: LADDERS[st.len], safe: safeLevels(st.len, st.safe), time: st.time,
@@ -250,6 +255,7 @@ export class Engine {
       team: st.team || `Equipo de ${(s.players.find(p => p.id === s.hostId) || {}).name || 'anfitrión'}`,
       roster: s.players.map(p => ({ id: p.id, name: p.name, av: p.av })),
     };
+    if (st.mode === 'comp') this.compInit();
     this.event('start', this.meId);
     this.nextQuestion(false);
     return null;
@@ -271,10 +277,10 @@ export class Engine {
 
   nextQuestion(short) {
     const s = this.state, g = s.game;
-    const d = levelDifficulty(g.n, g.len, s.settings.diff);
+    const d = g.comp && g.comp.sd ? 5 : levelDifficulty(Math.min(g.n, g.len - 1), g.len, s.settings.diff);
     let item = this.pickItem(d);
     if (!item) { this.used = new Set(g.asked.slice(-3)); item = this.pickItem(d); }
-    if (!item) { this.gameOver('win'); return; }
+    if (!item) { if (g.comp) this.compOver(); else this.gameOver('win'); return; }
     this.used.add(item.id);
     const { q, answer } = toPlayable(item);
     q.d = d;
@@ -284,6 +290,7 @@ export class Engine {
     g.lastCat = item.cat;
     if (q.custom) g.custom = true;
     g.asked.push(item.id);
+    if (g.comp && !short) this.compResetRound();
     s.phase = 'intro';
     this.t.phaseEnd = Date.now() + (short ? INTRO_SHORT : INTRO_MS);
     this.t.deadline = 0; this.t.finalAt = 0; this.t.total = 0;
@@ -293,6 +300,7 @@ export class Engine {
   startVoting(ms) {
     const s = this.state;
     s.phase = 'voting';
+    this.t.votingStart = Date.now();
     this.t.phaseEnd = 0;
     this.t.finalAt = 0;
     this.t.total = ms || 0;
@@ -303,6 +311,7 @@ export class Engine {
   vote(p, o) {
     const s = this.state, g = s.game;
     if (!g || s.phase !== 'voting' || !p.online) return;
+    if (g.comp) return;
     if (!(o === 4 || (Number.isInteger(o) && o >= 0 && o <= 3 && !g.removed.includes(o)))) return;
     const cur = g.votes[p.id];
     let changed = true;
@@ -426,6 +435,185 @@ export class Engine {
     this.event('life', p.id, { role });
   }
 
+  // =====================================================================
+  // Modo competitivo: todos responden las mismas preguntas por su cuenta,
+  // nadie queda eliminado, cada acierto paga el valor del escalón y gana
+  // quien junte más. Cada jugador tiene todos los comodines una vez.
+  // Empate al final: muerte súbita entre los empatados.
+  // =====================================================================
+  isComp() { const g = this.state && this.state.game; return !!(g && g.comp); }
+
+  compInit() {
+    const g = this.state.game;
+    this.pAns = {};
+    const p = {};
+    for (const r of g.roster) p[r.id] = this.compFresh();
+    g.comp = { p, score: {}, correct: {}, timeMs: {}, sd: null, sdRound: 0, rank: null };
+    for (const r of g.roster) { g.comp.score[r.id] = 0; g.comp.correct[r.id] = 0; g.comp.timeMs[r.id] = 0; }
+    g.life = {};
+  }
+  compFresh() {
+    return {
+      o: null, c: false, t: 0, res: null, removed: [], poll: null, hint: null, dbl: false, retry: false, extra: 0, q: null, ans: null,
+      life: { sabio: false, influencer: false, hacker: false, suertudo: false, profesora: false, crono: false },
+    };
+  }
+  // Quién juega la pregunta actual (en muerte súbita, solo los empatados).
+  compPlayers() {
+    const g = this.state.game;
+    const ids = g.comp.sd ? g.comp.sd : g.roster.map(r => r.id);
+    return ids.filter(id => g.comp.p[id]);
+  }
+  compOnline() {
+    const on = new Set(this.state.players.filter(p => p.online).map(p => p.id));
+    return this.compPlayers().filter(id => on.has(id));
+  }
+  compResetRound() {
+    const g = this.state.game;
+    this.pAns = {};
+    for (const P of Object.values(g.comp.p)) {
+      P.o = null; P.c = false; P.t = 0; P.res = null; P.removed = []; P.poll = null; P.hint = null;
+      P.retry = false; P.extra = 0; P.q = null; P.ans = null;
+    }
+  }
+  compAnswerOf(id) { return this.pAns[id] != null ? this.pAns[id] : this.answer; }
+  compDeadline(P) { return this.t.deadline ? this.t.deadline + (P.extra || 0) : 0; }
+
+  compVote(p, o) {
+    const s = this.state, g = s.game;
+    if (s.phase !== 'voting' || !p.online) return;
+    const P = g.comp.p[p.id];
+    if (!P || !this.compPlayers().includes(p.id) || P.c) return;
+    if (!(Number.isInteger(o) && o >= 0 && o <= 3) || P.removed.includes(o)) return;
+    const dl = this.compDeadline(P);
+    if (dl && Date.now() > dl) return;
+    if (P.o === o) {
+      // segundo toque: fija la respuesta
+      P.c = true; P.t = Date.now();
+      if (P.dbl && o !== this.compAnswerOf(p.id)) {
+        // Doble intento: no era esa y puede volver a elegir (los demás no se enteran de cuál es la buena)
+        P.dbl = false; P.retry = true; P.removed = [...P.removed, o]; P.o = null; P.c = false; P.t = 0;
+        this.event('retry', p.id);
+      }
+    } else { P.o = o; P.retry = false; }
+    this.compCheck();
+  }
+
+  compLife(p, role) {
+    const s = this.state, g = s.game;
+    if (s.phase !== 'voting' || !p.online) return;
+    const P = g.comp.p[p.id];
+    if (!P || !this.compPlayers().includes(p.id) || P.c || !(role in P.life) || P.life[role]) return;
+    const ans = this.compAnswerOf(p.id);
+    const q = P.q || g.q;
+    switch (role) {
+      case 'sabio': {
+        const wrong = shuffle([0, 1, 2, 3].filter(i => i !== ans && !P.removed.includes(i)));
+        const k = Math.min(2, wrong.length - 1);
+        if (k <= 0) return;
+        P.removed = [...P.removed, ...wrong.slice(0, k)];
+        if (P.removed.includes(P.o)) P.o = null;
+        break;
+      }
+      case 'influencer': P.poll = makePoll(ans, q.d, P.removed); break;
+      case 'profesora': P.hint = makeHint(ans, q.d, P.removed); break;
+      case 'suertudo': if (P.dbl) return; P.dbl = true; break;
+      case 'crono': if (!this.t.deadline) return; P.extra += 30000; break;
+      case 'hacker': {
+        // pregunta nueva del mismo nivel, solo para este jugador
+        const item = this.pickItem(q.d);
+        if (!item) return;
+        this.used.add(item.id);
+        const play = toPlayable(item);
+        play.q.d = q.d;
+        P.q = play.q; this.pAns[p.id] = play.answer;
+        P.o = null; P.removed = []; P.poll = null; P.hint = null; P.retry = false;
+        g.asked.push(item.id);
+        break;
+      }
+      default: return;
+    }
+    P.life[role] = true;
+    this.event('life', p.id, { role });
+  }
+
+  // ¿Ya respondieron todos (o se les acabó el tiempo)?
+  compCheck(now = Date.now()) {
+    const s = this.state, g = s.game;
+    if (s.phase !== 'voting') return;
+    const ids = this.compOnline();
+    const done = id => { const P = g.comp.p[id]; const dl = this.compDeadline(P); return P.c || (dl && now >= dl); };
+    if (!ids.length || ids.every(done)) this.compLock();
+  }
+
+  compLock() {
+    const s = this.state;
+    this.t.deadline = 0; this.t.finalAt = 0;
+    s.phase = 'locked';
+    this.t.phaseEnd = Date.now() + 1800;
+    this.push();
+  }
+
+  compReveal() {
+    const s = this.state, g = s.game, C = g.comp;
+    const prize = C.sd ? 0 : g.ladder[Math.min(g.n, g.len - 1)];
+    const full = (s.settings.time || 0) * 1000;
+    for (const id of this.compPlayers()) {
+      const P = C.p[id];
+      const ans = this.compAnswerOf(id);
+      P.ans = ans;
+      if (P.o != null && P.o === ans) { P.res = 'ok'; C.score[id] += prize; if (!C.sd) C.correct[id]++; }
+      else P.res = P.o == null ? 'timeout' : 'bad';
+      const took = P.t ? P.t - (this.t.votingStart || P.t) : full + (P.extra || 0);
+      C.timeMs[id] += Math.max(0, took);
+    }
+    g.answer = this.answer;
+    s.phase = 'reveal';
+    this.t.phaseEnd = Date.now() + 4200;
+    this.push();
+  }
+
+  compAfterReveal() {
+    const g = this.state.game, C = g.comp;
+    if (C.sd) {
+      C.sdRound++;
+      const winners = C.sd.filter(id => C.p[id].res === 'ok');
+      if (winners.length >= 1 && winners.length < C.sd.length) C.sd = winners;
+      if (C.sd.length === 1 || C.sdRound >= 6) { this.compOver(); return; } // tras 6 rondas decide el tiempo
+      this.nextQuestion(false);
+      return;
+    }
+    g.n++;
+    if (g.n < g.len) { this.nextQuestion(false); return; }
+    // Fin de la escalera: ¿empate en el primer lugar?
+    const top = Math.max(...g.roster.map(r => C.score[r.id] || 0));
+    const tied = g.roster.map(r => r.id).filter(id => (C.score[id] || 0) === top);
+    if (tied.length > 1) {
+      C.sd = tied; C.sdRound = 0;
+      this.event('sd', this.meId);
+      this.nextQuestion(false);
+    } else this.compOver();
+  }
+
+  compOver() {
+    const s = this.state, g = s.game, C = g.comp;
+    const sdAlive = new Set(C.sd || []);
+    const rank = g.roster.map(r => ({
+      id: r.id, name: r.name, av: r.av, score: C.score[r.id] || 0, correct: C.correct[r.id] || 0,
+      timeMs: Math.round(C.timeMs[r.id] || 0), sd: sdAlive.has(r.id),
+    }));
+    // dinero; en empate, quien sobrevivió a la muerte súbita; luego el más rápido
+    rank.sort((a, b) => b.score - a.score || (b.sd - a.sd) || a.timeMs - b.timeMs);
+    C.rank = rank;
+    g.answer = this.answer;
+    g.outcome = { kind: 'comp', prize: rank[0] ? rank[0].score : 0, level: g.n, winner: rank[0] ? rank[0].id : null, sdRounds: C.sdRound };
+    s.phase = 'over';
+    this.t = { phaseEnd: 0, deadline: 0, finalAt: 0, total: 0, remainAtLock: 0 };
+    this.event('over', this.meId);
+    this.push();
+    try { this.onOver && this.onOver(JSON.parse(JSON.stringify(s))); } catch (e) { console.warn(e); }
+  }
+
   tick() {
     const s = this.state;
     if (!s) return;
@@ -436,14 +624,15 @@ export class Engine {
           if (now >= this.t.phaseEnd) this.startVoting(s.settings.time * 1000);
           break;
         case 'voting':
+          if (s.game.comp) { this.compCheck(now); break; }
           if (this.t.finalAt && now >= this.t.finalAt) this.resolve();
           else if (this.t.deadline && now >= this.t.deadline) this.resolve();
           break;
         case 'locked':
-          if (now >= this.t.phaseEnd) this.reveal();
+          if (now >= this.t.phaseEnd) { if (s.game.comp) this.compReveal(); else this.reveal(); }
           break;
         case 'reveal':
-          if (now >= this.t.phaseEnd) this.afterReveal();
+          if (now >= this.t.phaseEnd) { if (s.game.comp) this.compAfterReveal(); else this.afterReveal(); }
           break;
         default: break;
       }

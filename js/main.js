@@ -421,6 +421,8 @@ function applyState(st) {
   S.deadline = tm && tm.left != null && st.phase === 'voting' ? now + tm.left : 0;
   S.total = tm && tm.total ? tm.total : 0;
   S.finalAt = tm && tm.final != null && st.phase === 'voting' ? now + tm.final : 0;
+  const myComp = g && g.comp && g.comp.p[me.id];
+  if (myComp && myComp.extra && S.deadline) { S.deadline += myComp.extra; S.total += myComp.extra; }
   if (!S.engine && S.seenSentTo !== st.hostId) { S.seenSentTo = st.hostId; act({ t: 'seen', ids: getSeen() }); }
 
   const theme = THEMES[st.settings.theme] ? st.settings.theme : 'gala';
@@ -453,6 +455,16 @@ function processEvents(st, prev) {
         addSys(`${name} se unió a la sala.`);
         audio.sfx('join');
         if (stage) { stage.setAnim(e.by, 'wave'); setTimeout(() => stage && stage.setAnim(e.by, 'idle'), 2200); }
+      } else if (e.kind === 'life' && ROLES[e.role] && st.game && st.game.comp && e.by !== me.id) {
+        addSys(`${name} usó ${ROLES[e.role].icon} ${ROLES[e.role].power}.`);
+      } else if (e.kind === 'retry') {
+        if (e.by === me.id) { audio.sfx('wrong'); centerMsg('¡Uy, no era esa!', '🍀 Doble intento: elige otra', 'bad', 2000); }
+      } else if (e.kind === 'sd') {
+        const C = st.game && st.game.comp;
+        const names = C && C.sd ? C.sd.map(id => (st.players.find(p => p.id === id) || {}).name || '?').join(' vs ') : '';
+        audio.sfx('final');
+        centerMsg('⚔️ ¡Empate!', `Muerte súbita: ${names}`, '', 2600);
+        addSys(`⚔️ Muerte súbita: ${names}. Gana quien acierte cuando el otro falle.`);
       } else if (e.kind === 'life' && ROLES[e.role]) {
         const R = ROLES[e.role];
         addSys(`${name} usó ${R.icon} ${R.power}.`);
@@ -527,10 +539,11 @@ function renderSettings(st, isHost) {
         <div class="f-row"><span class="f-label">Temas</span><div class="chip-tools"><button type="button" data-cats="all">Todos</button><button type="button" data-cats="none">Ninguno</button></div></div>
         <div class="chips" id="f-cats">${CATEGORIES.map(c => `<button type="button" class="chip" data-cat="${c.id}">${c.icon} ${c.name}</button>`).join('')}</div>
       </div>
+      <div class="field"><span class="f-label">Modo de juego</span>${seg('mode', [['coop', '🤝 Cooperativo'], ['comp', '⚔️ Competitivo']])}<small class="muted" id="f-mode-info"></small></div>
       <div class="field"><span class="f-label">Escalera</span>${seg('len', [[10, '10 preguntas'], [15, '15 preguntas'], [20, '20 preguntas']])}</div>
       <div class="field"><span class="f-label">Tiempo por pregunta</span>${seg('time', TIME_OPTIONS.map(t => [t, t ? `${t} s` : 'Sin límite']))}</div>
       <div class="field"><span class="f-label">Dificultad</span>${seg('diff', DIFFICULTIES.map(d => [d.id, d.name]))}</div>
-      <div class="field"><span class="f-label">Puntos seguros</span>${seg('safe', SAFE_MODES.map(d => [d.id, d.name]))}</div>
+      <div class="field" id="f-safe-field"><span class="f-label">Puntos seguros</span>${seg('safe', SAFE_MODES.map(d => [d.id, d.name]))}</div>
       <div class="field"><span class="f-label">Estilo visual</span><div class="themes" id="f-themes"></div></div>
       <div class="field"><span class="f-label">Sala</span>${seg('pub', [['false', '🔒 Privada'], ['true', '🌎 Pública']])}</div>
       <div class="field"><span class="f-label">Preguntas personalizadas</span>
@@ -553,6 +566,11 @@ function renderSettings(st, isHost) {
     if (bank.loaded && !c.querySelector('small')) c.insertAdjacentHTML('beforeend', ` <small>${bank.countFor([c.dataset.cat])}</small>`);
   }
   for (const b of $$('.chip-tools button', form)) b.classList.toggle('hidden', !isHost);
+  const comp = s.mode === 'comp';
+  $('#f-safe-field').classList.toggle('hidden', comp);
+  $('#f-mode-info').textContent = comp
+    ? 'Cada quien responde por su lado y nadie queda fuera: cada acierto paga el valor de su escalón y gana quien junte más. Todos tienen los 6 comodines, una vez cada uno. Si hay empate, muerte súbita. Mínimo 2 jugadores.'
+    : 'Todo el equipo vota la misma respuesta y suben juntos la escalera.';
   const team = $('#f-team');
   if (document.activeElement !== team) team.value = s.team;
   team.disabled = !isHost;
@@ -617,7 +635,7 @@ function renderRoles(st) {
       <span class="ri">${R.icon}</span><b>${R.name}</b><span class="rp">${R.power}</span><span class="rd">${esc(R.desc)}</span>
       ${owner ? `<img class="owner" src="${thumb(owner.av, 64)}" alt="${esc(owner.name)}" title="${esc(owner.name)}">` : ''}
     </button>`;
-  }).join('') + `<p class="muted small" style="grid-column:1/-1;margin:2px 0 0">${myRole ? `Tu rol: ${ROLES[myRole].icon} ${ROLES[myRole].name}. ` : ''}Si son menos de 4, los comodines sin dueño se reparten entre el equipo.</p>`;
+  }).join('') + `<p class="muted small" style="grid-column:1/-1;margin:2px 0 0">${myRole ? `Tu rol: ${ROLES[myRole].icon} ${ROLES[myRole].name}. ` : ''}${st.settings.mode === 'comp' ? '⚔️ En competitivo cada jugador tiene los 6 comodines (una vez cada uno); el rol solo es tu personaje.' : 'Si son menos de 4, los comodines sin dueño se reparten entre el equipo.'}</p>`;
 }
 
 // ====================================================================
@@ -632,7 +650,30 @@ function showGame() {
   setTimeout(updateFraming, 60);
 }
 
+// En competitivo cada quien ve su propia pregunta, sus comodines y su respuesta: se arma una vista
+// del estado con esos datos para reutilizar las mismas funciones de dibujo que el modo cooperativo.
+function viewOf(st) {
+  const g = st && st.game;
+  if (!g || !g.comp) return st;
+  const C = g.comp, P = C.p[me.id];
+  const v = { ...g, safe: [], life: {}, sharedQ: g.q, me: P || null, playing: !!P && (!C.sd || C.sd.includes(me.id)) };
+  if (P) {
+    v.q = P.q || g.q;
+    v.removed = P.removed; v.poll = P.poll; v.hint = P.hint; v.dbl = P.dbl;
+    v.votes = P.o != null ? { [me.id]: { o: P.o, c: P.c } } : {};
+    v.picked = P.o; v.result = P.res;
+    v.answer = P.ans != null ? P.ans : g.answer;
+  } else { v.votes = {}; v.picked = null; v.result = null; v.removed = []; v.poll = null; v.hint = null; v.dbl = false; }
+  return { ...st, game: v };
+}
+function compPlace(g, id) {
+  const C = g.comp;
+  const sorted = g.roster.map(r => C.score[r.id] || 0).sort((a, b) => b - a);
+  return sorted.indexOf(C.score[id] || 0) + 1;
+}
+
 function renderGame(st, prev) {
+  st = viewOf(st); prev = prev && viewOf(prev);
   const g = st.game;
   if (!g) return;
   const pg = prev && prev.game;
@@ -642,7 +683,9 @@ function renderGame(st, prev) {
   if (newGame) { $('#over').classList.add('hidden'); S.overShown = null; if (stage) stage.hideConfetti(); }
 
   const shownLevel = Math.min(g.n, g.len - 1);
-  $('#level-pill').innerHTML = `<span class="lp-word">Pregunta </span><b>${Math.min(g.n + 1, g.len)}</b>/${g.len} · <b>${fmtMoney(g.ladder[shownLevel])}</b>`;
+  if (g.comp && st.phase === 'over') $('#level-pill').innerHTML = '🏁 <b>Fin de la partida</b>' + (g.me ? ` · Tú <b>${fmtMoney(g.comp.score[me.id] || 0)}</b>` : '');
+  else if (g.comp && g.comp.sd) $('#level-pill').innerHTML = `⚔️ <b>Muerte súbita</b> · ronda ${g.comp.sdRound + 1}`;
+  else $('#level-pill').innerHTML = `<span class="lp-word">Pregunta </span><b>${Math.min(g.n + 1, g.len)}</b>/${g.len} · <b>${fmtMoney(g.ladder[shownLevel])}</b>` + (g.comp && g.me ? ` · Tú <b>${fmtMoney(g.comp.score[me.id] || 0)}</b> (${compPlace(g, me.id)}.º)` : '');
   renderLadder(st);
   renderLifelines(st);
   renderQuestion(st, qChanged);
@@ -668,7 +711,8 @@ function onPhase(st, prev, qChanged) {
   if (ph === 'intro') {
     if (qChanged) {
       audio.sfx('whoosh');
-      centerMsg(`Pregunta ${g.n + 1}`, `por ${fmtMoney(g.ladder[Math.min(g.n, g.len - 1)])}`, '', 1500);
+      if (g.comp && g.comp.sd) centerMsg('⚔️ Muerte súbita', `Ronda ${g.comp.sdRound + 1}`, '', 1500);
+      else centerMsg(`Pregunta ${g.n + 1}`, `por ${fmtMoney(g.ladder[Math.min(g.n, g.len - 1)])}`, '', 1500);
     }
     audio.setMusic('think', g.n / Math.max(1, g.len - 1));
     stage.cameraShot('wide'); stage.setMood('idle');
@@ -680,6 +724,20 @@ function onPhase(st, prev, qChanged) {
     audio.sfx('lock'); audio.setMusic('tension');
     stage.cameraShot('lock'); stage.setMood('tense');
     online.forEach(p => stage.setAnim(p.id, 'think'));
+  } else if (ph === 'reveal' && g.comp) {
+    stage.cameraShot('reveal');
+    const P = g.me;
+    const prize = g.ladder[Math.min(g.n, g.len - 1)];
+    if (!P || !g.playing) {
+      centerMsg('Respuesta', g.answer != null && g.q ? `Era la ${LETTERS[g.answer]}: ${g.q.opts[g.answer]}` : '', '', 2200);
+    } else if (P.res === 'ok') {
+      audio.sfx('correct'); audio.sfx('coin');
+      stage.confetti(0.6); stage.setMood('cheer');
+      centerMsg('¡Correcto!', g.comp.sd ? 'Sigues vivo en la muerte súbita' : `+${fmtMoney(prize)}`, 'good', 2400);
+    } else {
+      audio.sfx('wrong'); stage.shake(0.35); stage.setMood('tense');
+      centerMsg(P.res === 'timeout' ? '⏰ ¡Sin tiempo!' : 'Incorrecto', g.q && g.answer != null ? `Era la ${LETTERS[g.answer]}: ${g.q.opts[g.answer]}` : '', 'bad', 2800);
+    }
   } else if (ph === 'reveal') {
     stage.cameraShot('reveal');
     if (g.result === 'ok') {
@@ -699,7 +757,12 @@ function onPhase(st, prev, qChanged) {
   } else if (ph === 'over') {
     const kind = g.outcome && g.outcome.kind;
     stage.cameraShot('over');
-    if (kind === 'win') {
+    if (kind === 'comp') {
+      const iWon = g.outcome.winner === me.id;
+      audio.sfx(iWon ? 'win' : 'walk'); audio.setMusic(iWon ? 'win' : 'lobby');
+      stage.fireworks(iWon ? 10 : 4); stage.confetti(iWon ? 1.4 : 0.6); stage.setMood('cheer');
+      online.forEach(p => stage.setAnim(p.id, p.id === g.outcome.winner ? 'dance' : 'wave'));
+    } else if (kind === 'win') {
       audio.sfx('win'); audio.setMusic('win');
       stage.fireworks(10); stage.confetti(1.4); stage.setMood('cheer'); stage.setAllAnim('dance');
     } else if (kind === 'walk') {
@@ -722,12 +785,35 @@ function renderLadder(st) {
     if (i === g.len - 1) cls.push('top');
     return `<div class="${cls.join(' ')}"><span class="rn">${i + 1}</span><span class="ra">${amt.toLocaleString('es-MX')}</span></div>`;
   }).join('');
+  let board = '';
+  if (g.comp) {
+    const C = g.comp;
+    const rows = g.roster.map(r => ({ ...r, score: C.score[r.id] || 0 })).sort((a, b) => b.score - a.score);
+    board = `<div class="scoreboard"><div class="sb-title">${C.sd ? '⚔️ Muerte súbita' : 'Marcador'}</div>${rows.map((r, i) => `<div class="sb-row ${r.id === me.id ? 'me' : ''} ${C.sd && C.sd.includes(r.id) ? 'sd' : ''}"><span class="sb-pos">${i + 1}</span>${imgThumb(r.av, r.name, 48)}<span class="sb-name">${esc(r.name)}</span><span class="sb-money">${fmtMoney(r.score)}</span></div>`).join('')}</div>`;
+  }
+  const full = html + board;
   const el = $('#ladder');
-  if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; const cur = $('.rung.cur', el); if (cur) cur.scrollIntoView({ block: 'nearest' }); }
+  if (el.dataset.html !== full) { el.innerHTML = full; el.dataset.html = full; const cur = $('.rung.cur', el); if (cur) cur.scrollIntoView({ block: 'nearest' }); }
 }
 
 function renderLifelines(st) {
   const g = st.game;
+  if (g.comp) {
+    const P = g.me;
+    const html = Object.keys(ROLES).map(role => {
+      const R = ROLES[role];
+      const used = !P || P.life[role];
+      let can = !!P && !used && st.phase === 'voting' && g.playing && !P.c;
+      if (role === 'crono' && !st.settings.time) can = false;
+      if (role === 'suertudo' && P && P.dbl) can = false;
+      const active = role === 'suertudo' && P && P.dbl;
+      return `<button class="life mine ${used ? 'used' : ''} ${active ? 'active' : ''}" data-role="${role}" ${can ? '' : 'disabled'} title="${esc(R.desc)}">
+        <span class="li">${R.icon}</span><span><b>${R.power}</b><small>${active ? '¡activo!' : used ? 'usado' : 'una vez'}</small></span><span></span></button>`;
+    }).join('');
+    const el = $('#lifelines');
+    if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
+    return;
+  }
   const html = Object.entries(g.life).map(([role, L]) => {
     const R = ROLES[role];
     if (!R) return '';
@@ -776,25 +862,55 @@ function renderQuestion(st, qChanged) {
     const revealed = (st.phase === 'reveal' || st.phase === 'over') && g.answer != null;
     b.classList.toggle('correct', revealed && g.answer === i);
     b.classList.toggle('wrong', (st.phase === 'reveal' && g.result === 'retry' && g.picked === i) || (revealed && g.picked === i && g.answer !== i));
-    b.disabled = !isVoting || removed;
+    b.disabled = !isVoting || removed || (!!g.comp && (!g.playing || !!(g.me && g.me.c)));
     $('.pct', b).textContent = g.poll && !removed ? `${g.poll[i]}%` : '';
     b.setAttribute('aria-label', `Respuesta ${LETTERS[i]}: ${q.opts[i]}`);
   });
   const extra = [];
   if (g.hint) extra.push(`📚 La Profesora: «Creo que es la ${LETTERS[g.hint.idx]}, estoy ${g.hint.conf}% segura».`);
   if (g.poll) extra.push('📱 Encuesta del público en pantalla.');
-  if (g.dbl) extra.push('🍀 Doble intento activo: si fallan, tienen otra oportunidad.');
+  if (g.dbl) extra.push(g.comp ? '🍀 Doble intento activo: si fallas, tienes otra oportunidad.' : '🍀 Doble intento activo: si fallan, tienen otra oportunidad.');
+  if (g.comp && g.me && g.me.retry && st.phase === 'voting') extra.push('🍀 No era esa: elige otra.');
+  if (g.comp && g.me && g.me.extra) extra.push(`⏱️ +${g.me.extra / 1000} s para ti.`);
   $('#q-extra').textContent = extra.join(' ');
   const walk = $('#btn-walk');
   const cur = g.n > 0 ? g.ladder[g.n - 1] : 0;
   $('.walk-txt', walk).textContent = `🏳️ Plantarse con ${fmtMoney(cur)}`;
   walk.disabled = !isVoting;
+  walk.classList.toggle('hidden', !!g.comp);
   walk.classList.toggle('mine', !!myVote && myVote.o === 4 && isVoting);
 }
 
 function renderVotes(st) {
   const g = st.game;
   const online = st.players.filter(p => p.online);
+  if (g.comp) {
+    const C = g.comp;
+    const reveal = st.phase === 'reveal' || st.phase === 'over';
+    const myQ = g.q && g.q.id;
+    const by = { 0: [], 1: [], 2: [], 3: [] };
+    for (const p of online) {
+      const P = C.p[p.id];
+      if (!P || P.o == null) continue;
+      const theirQ = (P.q || g.sharedQ || {}).id;
+      if (p.id === me.id || (reveal && theirQ === myQ)) by[P.o].push(p);
+    }
+    $$('.answer').forEach((b, i) => { $('.voters', b).innerHTML = by[i].map(p => imgThumb(p.av, p.name, 64)).join(''); });
+    $('#btn-walk .voters').innerHTML = '';
+    if (!stage) return;
+    const inPlay = new Set(C.sd || g.roster.map(r => r.id));
+    for (const p of online) {
+      const P = C.p[p.id];
+      if (!P || !inPlay.has(p.id)) { stage.setSign(p.id, null, colorOf(p.av)); continue; }
+      if (st.phase === 'voting') { stage.setSign(p.id, P.c ? '✔' : null, colorOf(p.av)); stage.setAnim(p.id, P.c ? 'vote' : 'think'); }
+      else if (st.phase === 'locked') stage.setSign(p.id, '✔', colorOf(p.av));
+      else if (st.phase === 'reveal') {
+        stage.setSign(p.id, P.o != null ? LETTERS[P.o] : '⏰', colorOf(p.av));
+        stage.setAnim(p.id, P.res === 'ok' ? 'happy' : 'sad');
+      } else stage.setSign(p.id, null, colorOf(p.av));
+    }
+    return;
+  }
   const showVotes = st.phase === 'voting' || st.phase === 'locked' || st.phase === 'reveal';
   const by = { 0: [], 1: [], 2: [], 3: [], 4: [] };
   if (showVotes) for (const p of online) { const v = g.votes[p.id]; if (v && by[v.o]) by[v.o].push(p); }
@@ -811,6 +927,28 @@ function renderVotes(st) {
 function renderStatus(st) {
   const g = st.game;
   const online = st.players.filter(p => p.online);
+  if (g.comp) {
+    const C = g.comp, P = g.me;
+    const inPlay = online.filter(p => C.p[p.id] && (!C.sd || C.sd.includes(p.id)));
+    const ready = inPlay.filter(p => C.p[p.id].c).length;
+    let text = '';
+    switch (st.phase) {
+      case 'intro': text = C.sd ? '⚔️ Muerte súbita: lee bien…' : '👀 Lee bien la pregunta…'; break;
+      case 'voting':
+        if (!g.playing) text = C.sd ? '⚔️ Muerte súbita entre los empatados' : 'Estás viendo la partida';
+        else if (P.c) text = '🔒 Fijada. Esperando a los demás…';
+        else if (P.o != null) text = `Elegiste la ${LETTERS[P.o]} · toca otra vez para fijarla`;
+        else text = 'Elige tu respuesta · toca otra vez para fijarla';
+        text += ` · ${ready}/${inPlay.length} listos`;
+        break;
+      case 'locked': text = '🥁 Respuestas fijadas…'; break;
+      case 'reveal': text = !P || !g.playing ? '' : { ok: '🎉 ¡Correcto!', bad: '😢 Incorrecto', timeout: '⏰ Sin tiempo' }[P.res] || ''; break;
+      case 'over': text = '🏁 Fin de la partida'; break;
+      default: break;
+    }
+    $('#status-line').textContent = text;
+    return;
+  }
   const solo = online.length === 1;
   const v = g.votes[me.id];
   let text = '';
@@ -836,6 +974,7 @@ function renderOver(st) {
   const g = st.game;
   const o = g.outcome;
   if (!o) return;
+  if (o.kind === 'comp') { renderCompOver(st); return; }
   const isHost = st.hostId === me.id;
   const inRoster = g.roster.some(p => p.id === me.id);
   // Estadísticas y desbloqueos (una vez por partida)
@@ -890,10 +1029,48 @@ function renderOver(st) {
   }
 }
 
+function renderCompOver(st) {
+  const g = st.game, o = g.outcome, rank = (g.comp && g.comp.rank) || [];
+  const isHost = st.hostId === me.id;
+  const mine = rank.find(r => r.id === me.id);
+  if (S.recorded !== g.id && mine) {
+    S.recorded = g.id;
+    S.unlocks = recordGame({ level: mine.correct, len: g.len, prize: mine.score, won: mine.correct >= g.len, walked: false, correct: mine.correct, teamSize: g.roster.length });
+    addSeen(g.asked);
+    if (S.unlocks.length) setTimeout(() => audio.sfx('unlock'), 1800);
+  }
+  const key = g.id + (isHost ? 'h' : 'g');
+  if (S.overShown === key) return;
+  S.overShown = key;
+  const winner = rank[0];
+  const iWon = winner && winner.id === me.id;
+  const secs = ms => (ms / 1000).toFixed(1) + ' s';
+  const medal = i => ['🥇', '🥈', '🥉'][i] || `${i + 1}.º`;
+  const el = $('#over');
+  el.innerHTML = `<div class="over-box card">
+    <p class="over-sub">⚔️ Modo competitivo${o.sdRounds ? ` · se definió en muerte súbita (${o.sdRounds} ronda${o.sdRounds > 1 ? 's' : ''})` : ''}</p>
+    <h2 class="over-title">${iWon ? '¡GANASTE!' : `¡Ganó ${esc(winner ? winner.name : '')}!`}</h2>
+    <div class="over-prize">${fmtMoney(winner ? winner.score : 0)}</div>
+    <div class="comp-rank">${rank.map((r, i) => `<div class="cr-row ${r.id === me.id ? 'me' : ''}"><span class="cr-pos">${medal(i)}</span>${imgThumb(r.av, r.name, 64)}<span class="cr-name">${esc(r.name)}</span><span class="cr-info">${r.correct}/${g.len} aciertos · ${secs(r.timeMs)}</span><span class="cr-money">${fmtMoney(r.score)}</span></div>`).join('')}</div>
+    <div class="unlocks">${S.recorded === g.id ? S.unlocks.map((u, i) => `<div class="unlock" style="animation-delay:${1.2 + i * 0.3}s">🎁 ¡Desbloqueaste ${esc(u.kind.toLowerCase())}: ${u.icon} ${esc(u.name)}!</div>`).join('') : ''}</div>
+    <p class="fame-note">Las partidas competitivas no entran al Salón de la fama.</p>
+    <div class="over-actions">
+      ${isHost ? '<button class="btn btn-go btn-big" id="btn-again">Jugar otra vez</button>' : '<p class="muted" style="width:100%">Esperando a que el anfitrión vuelva a la sala…</p>'}
+      <button class="btn" id="btn-over-leave">Salir</button>
+      <button class="btn btn-ghost btn-small" id="btn-report">⚑ Reportar la última pregunta</button>
+    </div>
+  </div>`;
+  el.classList.remove('hidden');
+  const again = $('#btn-again', el);
+  if (again) again.addEventListener('click', () => act({ t: 'lobby' }));
+  $('#btn-over-leave', el).addEventListener('click', () => leaveRoom(false));
+  $('#btn-report', el).addEventListener('click', () => openReportModal(g.q));
+}
+
 function hostOver(st) {
   const g = st.game;
   const o = g.outcome;
-  if (!o || g.custom || o.prize <= 0) return;
+  if (!o || g.comp || g.custom || o.prize <= 0) return;
   submitFame({
     team_name: (g.team || 'Equipo').slice(0, 32),
     players: g.roster.slice(0, 4).map(p => ({ n: String(p.name).slice(0, 16), c: p.av.color, e: p.av.eyes, m: p.av.mouth, h: p.av.hat })),

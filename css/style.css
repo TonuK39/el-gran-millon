@@ -487,3 +487,22 @@ textarea.input { min-height: 180px; resize: vertical; font-family: ui-monospace,
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
 body.reduce-motion *, body.reduce-motion *::before, body.reduce-motion *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+
+/* ---- Modo competitivo ---- */
+.scoreboard { display: grid; gap: 3px; padding: 4px 2px 8px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+.sb-title { font-family: var(--display); font-weight: 800; font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--gold); padding: 0 6px 2px; }
+.sb-row { display: grid; grid-template-columns: 18px 26px 1fr auto; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 9px; font-weight: 800; font-size: 0.85rem; }
+.sb-row img { width: 26px; height: 26px; border-radius: 8px; border: 2px solid; }
+.sb-row .sb-pos { color: var(--muted); }
+.sb-row .sb-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-row .sb-money { color: var(--gold); }
+.sb-row.me { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.sb-row.sd { box-shadow: inset 0 0 0 2px var(--bad); }
+.comp-rank { display: grid; gap: 6px; margin: 10px 0 6px; text-align: left; }
+.cr-row { display: grid; grid-template-columns: 40px 40px 1fr auto; grid-template-areas: 'pos img name money' 'pos img info money'; align-items: center; column-gap: 10px; padding: 6px 10px; border-radius: 14px; background: rgba(255, 255, 255, 0.05); }
+.cr-row.me { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.cr-row .cr-pos { grid-area: pos; font-size: 1.5rem; text-align: center; font-weight: 800; }
+.cr-row img { grid-area: img; width: 40px; height: 40px; border-radius: 12px; border: 2px solid; }
+.cr-row .cr-name { grid-area: name; font-weight: 800; }
+.cr-row .cr-info { grid-area: info; color: var(--muted); font-size: 0.82rem; font-weight: 700; }
+.cr-row .cr-money { grid-area: money; font-family: var(--display); font-weight: 800; color: var(--gold); font-size: 1.15rem; }
