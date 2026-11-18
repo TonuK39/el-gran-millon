@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prueba de audio · El Gran Millón</title>
+<style>
+  :root { color-scheme: dark; --bg: #0d1020; --card: #141936; --line: #2a2f50; --gold: #f5c542; --txt: #e8e8f0; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; font: 15px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--txt); }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  section { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+  h2 { font-size: 13px; margin: 0 0 8px; color: var(--gold); text-transform: uppercase; letter-spacing: .06em; }
+  button { margin: 3px; padding: 8px 12px; border-radius: 8px; border: 1px solid #3b4270; background: #1e2550; color: inherit; font: inherit; cursor: pointer; }
+  button:hover { background: #2a3370; }
+  button.on { background: var(--gold); color: #111; border-color: var(--gold); }
+  label { display: flex; align-items: center; gap: 10px; margin: 6px 0; flex-wrap: wrap; }
+  label span { min-width: 80px; }
+  input[type=range] { flex: 1; min-width: 140px; max-width: 340px; }
+  #meter { height: 10px; margin-top: 8px; background: #222; border-radius: 5px; overflow: hidden; }
+  #bar { height: 100%; width: 0; background: linear-gradient(90deg, #3c6, #fc3 70%, #f44); }
+  #stats { margin-top: 6px; font: 12px/1.4 ui-monospace, monospace; color: #aab; }
+  #log { white-space: pre-wrap; font: 12px/1.45 ui-monospace, monospace; max-height: 260px; overflow: auto; background: #0a0c18; padding: 8px; border-radius: 6px; margin: 0; }
+  .err { color: #ff6b6b; }
+</style>
+</head>
+<body>
+<h1>El Gran Millón · banco de pruebas de audio</h1>
+
+<section>
+  <h2>Estado</h2>
+  <button id="pre">Llamar antes de desbloquear</button>
+  <button id="unlock">Activar audio (unlock)</button>
+  <span id="state">sin desbloquear</span>
+  <div id="meter"><div id="bar"></div></div>
+  <div id="stats"></div>
+</section>
+
+<section>
+  <h2>Música</h2>
+  <div id="modes"></div>
+  <label><span>Intensidad</span><input id="int" type="range" min="0" max="1" step="0.01" value="0"><output id="intv">0.00</output></label>
+</section>
+
+<section>
+  <h2>Volumen</h2>
+  <label><span>Música</span><input id="vm" type="range" min="0" max="1" step="0.01" value="0.8"><output id="vmv">0.80</output></label>
+  <label><span>Efectos</span><input id="vs" type="range" min="0" max="1" step="0.01" value="0.8"><output id="vsv">0.80</output></label>
+</section>
+
+<section>
+  <h2>Efectos</h2>
+  <div id="fx"></div>
+  <button id="unknown">nombre desconocido</button>
+  <button id="spam">Ráfaga 60× (límite de voces)</button>
+</section>
+
+<section>
+  <h2>Prueba automática</h2>
+  <button id="all">Probar todo</button>
+  <span id="allState"></span>
+</section>
+
+<section>
+  <h2>Registro</h2>
+  <pre id="log"></pre>
+</section>
+
+<script type="module">
+  // ── instrumentación de prueba (no forma parte del juego) ──
+  // Medidor: se engancha a lo que el módulo conecte al destino. Contador: fuentes vivas.
+  const logEl = document.getElementById('log');
+  const log = (msg, err = false) => {
+    const line = document.createElement('div');
+    line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+    if (err) line.className = 'err';
+    logEl.prepend(line);
+  };
+  window.__errors = [];
+  addEventListener('error', (e) => { window.__errors.push(String(e.message)); log('ERROR ' + e.message, true); });
+  addEventListener('unhandledrejection', (e) => { window.__errors.push(String(e.reason)); log('PROMESA RECHAZADA ' + e.reason, true); });
+
+  let analyser = null, live = 0, livePeak = 0;
+  const origConnect = AudioNode.prototype.connect;
+  AudioNode.prototype.connect = function (dest, ...rest) {
+    const r = origConnect.call(this, dest, ...rest);
+    if (dest instanceof AudioDestinationNode && !(this instanceof AudioBufferSourceNode) && !analyser) {
+      analyser = this.context.createAnalyser();
+      analyser.fftSize = 2048;
+      origConnect.call(this, analyser);
+    }
+    return r;
+  };
+  if (window.AudioScheduledSourceNode) {
+    const origStart = AudioScheduledSourceNode.prototype.start;
+    AudioScheduledSourceNode.prototype.start = function (...a) {
+      live++; livePeak = Math.max(livePeak, live);
+      this.addEventListener('ended', () => { live--; }, { once: true });
+      return origStart.apply(this, a);
+    };
+  }
+
+  const { audio } = await import('../js/audio.js');
+  window.audio = audio;
+
+  const MODES = ['home', 'lobby', 'think', 'tension', 'win', 'lose', 'off'];
+  const FXS = ['click', 'hover', 'vote', 'join', 'leave', 'chat', 'lifeline', 'tick', 'final', 'lock', 'correct',
+    'wrong', 'win', 'walk', 'unlock', 'swap', 'poll', 'whoosh', 'start', 'coin', 'react'];
+
+  // ── medición ──
+  const buf = new Float32Array(2048);
+  const meas = { sumSq: 0, n: 0, peak: 0 };
+  const resetMeas = () => { meas.sumSq = 0; meas.n = 0; meas.peak = 0; };
+  const db = (x) => (x > 0 ? (20 * Math.log10(x)).toFixed(1) : '-∞');
+  let lastRms = 0, lastPeak = 0;
+  setInterval(() => {
+    const st = document.getElementById('state');
+    st.textContent = audio.enabled ? 'activo' : 'inactivo';
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(buf);
+    let s = 0, pk = 0;
+    for (let i = 0; i < buf.length; i++) { const v = buf[i]; s += v * v; const a = Math.abs(v); if (a > pk) pk = a; }
+    lastRms = Math.sqrt(s / buf.length); lastPeak = pk;
+    meas.sumSq += s; meas.n += buf.length; meas.peak = Math.max(meas.peak, pk);
+    document.getElementById('bar').style.width = Math.min(100, pk * 100) + '%';
+    document.getElementById('stats').textContent =
+      `RMS ${db(lastRms)} dBFS · pico ${db(lastPeak)} dBFS · fuentes vivas ${live} (máx ${livePeak})`;
+  }, 50);
+  const measure = async (ms) => {
+    resetMeas();
+    await new Promise((r) => setTimeout(r, ms));
+    return { rms: meas.n ? Math.sqrt(meas.sumSq / meas.n) : 0, peak: meas.peak };
+  };
+
+  // ── controles ──
+  let curMode = 'off';
+  const modesEl = document.getElementById('modes');
+  const modeBtns = {};
+  for (const m of MODES) {
+    const b = document.createElement('button');
+    b.textContent = m; b.dataset.mode = m;
+    b.onclick = () => {
+      audio.unlock();
+      curMode = m;
+      audio.setMusic(m, Number(document.getElementById('int').value));
+      for (const k in modeBtns) modeBtns[k].classList.toggle('on', k === m);
+      log(`setMusic('${m}', ${document.getElementById('int').value})`);
+    };
+    modeBtns[m] = b; modesEl.append(b);
+  }
+  const intEl = document.getElementById('int');
+  intEl.oninput = () => {
+    document.getElementById('intv').textContent = Number(intEl.value).toFixed(2);
+    audio.setMusic(curMode, Number(intEl.value));
+  };
+  const vm = document.getElementById('vm'), vs = document.getElementById('vs');
+  const vol = () => {
+    document.getElementById('vmv').textContent = Number(vm.value).toFixed(2);
+    document.getElementById('vsv').textContent = Number(vs.value).toFixed(2);
+    audio.setVolumes({ music: Number(vm.value), sfx: Number(vs.value) });
+  };
+  vm.oninput = vol; vs.oninput = vol;
+
+  const fxEl = document.getElementById('fx');
+  for (const n of FXS) {
+    const b = document.createElement('button');
+    b.textContent = n; b.dataset.fx = n;
+    b.onclick = () => { audio.unlock(); audio.sfx(n); log(`sfx('${n}')`); };
+    if (n === 'hover') b.onmouseenter = () => audio.sfx('hover');
+    fxEl.append(b);
+  }
+  document.getElementById('unknown').onclick = () => { audio.sfx('noExiste'); audio.sfx(); audio.sfx('toString'); audio.setMusic('nada'); log('nombres desconocidos ignorados'); };
+  document.getElementById('spam').onclick = async () => {
+    const before = livePeak;
+    for (let i = 0; i < 60; i++) { audio.sfx(FXS[i % FXS.length]); audio.sfx('click'); }
+    log(`ráfaga enviada; fuentes vivas ahora ${live}`);
+  };
+  document.getElementById('pre').onclick = () => {
+    audio.sfx('click'); audio.setVolumes({ music: 0.8, sfx: 0.8 }); audio.setMusic('home');
+    curMode = 'home';
+    log(`llamadas antes de unlock: sin errores (enabled=${audio.enabled})`);
+  };
+  document.getElementById('unlock').onclick = () => { audio.unlock(); log('unlock()'); };
+
+  // ── prueba automática: cada modo y cada efecto, con niveles medidos ──
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  window.__report = null;
+  document.getElementById('all').onclick = async () => {
+    audio.unlock();
+    const allState = document.getElementById('allState');
+    const rep = { music: {}, fx: {}, errors: [], liveAfter: null, livePeak: null };
+    allState.textContent = 'en curso…';
+    for (const m of ['home', 'lobby', 'think', 'tension', 'win']) {
+      audio.setMusic(m, 0); curMode = m;
+      await sleep(1000);
+      const r = await measure(2500);
+      rep.music[m] = `rms ${db(r.rms)} / pico ${db(r.peak)}`;
+      log(`música ${m}: ${rep.music[m]} dBFS`);
+    }
+    audio.setMusic('think', 0); curMode = 'think';
+    await sleep(1200);
+    for (const x of [0.5, 1]) {
+      audio.setMusic('think', x);
+      await sleep(600);
+      const r = await measure(2500);
+      rep.music['think@' + x] = `rms ${db(r.rms)} / pico ${db(r.peak)}`;
+      log(`música think@${x}: ${rep.music['think@' + x]} dBFS`);
+    }
+    audio.setMusic('lose'); curMode = 'lose';
+    const rl = await measure(4000);
+    rep.music.lose = `rms ${db(rl.rms)} / pico ${db(rl.peak)}`;
+    log(`música lose: ${rep.music.lose} dBFS`);
+    await sleep(5500);
+    const rs = await measure(800);
+    rep.music['lose (después)'] = `rms ${db(rs.rms)}`;
+    log(`tras lose: rms ${db(rs.rms)} dBFS`);
+    audio.setMusic('off'); curMode = 'off';
+    await sleep(1500);
+    for (const n of FXS) {
+      audio.sfx(n);
+      const r = await measure(n === 'win' || n === 'poll' ? 2600 : 1100);
+      rep.fx[n] = `pico ${db(r.peak)}`;
+      log(`sfx ${n}: pico ${db(r.peak)} dBFS`);
+    }
+    await sleep(3500);
+    rep.liveAfter = live; rep.livePeak = livePeak; rep.errors = window.__errors.slice();
+    window.__report = rep;
+    allState.textContent = `hecho · fuentes vivas al final ${live} · errores ${rep.errors.length}`;
+    log('prueba automática terminada');
+  };
+</script>
+</body>
+</html>
