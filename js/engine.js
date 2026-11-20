@@ -5,7 +5,6 @@ import { toPlayable } from './questions.js';
 
 const INTRO_MS = 3400;
 const INTRO_SHORT = 2300;
-const FINAL_MS = 4000;
 const REVEAL_OK = 3700;
 const REVEAL_BAD = 4300;
 const RETRY_MS = 2800;
@@ -225,17 +224,17 @@ export class Engine {
     if (['off', 'mix', 'only'].includes(patch.customMode)) st.customMode = this.custom.list.length ? patch.customMode : 'off';
   }
 
+  // Cada jugador tiene exactamente un comodín: el de su rol. Quien no eligió recibe uno libre al azar.
   assignRoles() {
     const s = this.state;
     const online = s.players.filter(p => p.online);
     const life = {};
     for (const p of online) if (p.role && ROLES[p.role] && !life[p.role]) life[p.role] = { owner: p.id, used: false };
-    const owned = id => Object.values(life).filter(l => l.owner === id).length;
-    for (const r of BASE_ROLES) {
-      if (Object.keys(life).length >= 4) break;
-      if (life[r]) continue;
-      const owner = [...online].sort((a, b) => owned(a.id) - owned(b.id))[0];
-      life[r] = { owner: owner.id, used: false };
+    for (const p of online) {
+      if (Object.values(life).some(l => l.owner === p.id)) continue;
+      const free = shuffle(BASE_ROLES.filter(r => !life[r]));
+      const r = free[0] || shuffle(Object.keys(ROLES).filter(x => !life[x]))[0];
+      if (r) { life[r] = { owner: p.id, used: false, auto: true }; p.role = r; }
     }
     return life;
   }
@@ -252,7 +251,7 @@ export class Engine {
       id: rid(), n: 0, len: st.len, ladder: LADDERS[st.len], safe: safeLevels(st.len, st.safe), time: st.time,
       q: null, answer: null, removed: [], poll: null, hint: null, dbl: false, votes: {}, picked: null, result: null,
       life: this.assignRoles(), asked: [], correct: 0, outcome: null, lastCat: null, custom: false, timer: null,
-      team: st.team || `Equipo de ${(s.players.find(p => p.id === s.hostId) || {}).name || 'anfitrión'}`,
+      team: st.team || 'Los Sin Nombre', ps: {},
       roster: s.players.map(p => ({ id: p.id, name: p.name, av: p.av })),
     };
     if (st.mode === 'comp') this.compInit();
@@ -314,18 +313,14 @@ export class Engine {
     if (g.comp) return;
     if (!(o === 4 || (Number.isInteger(o) && o >= 0 && o <= 3 && !g.removed.includes(o)))) return;
     const cur = g.votes[p.id];
-    let changed = true;
-    if (cur && cur.o === o) { cur.c = true; changed = false; } else g.votes[p.id] = { o, t: Date.now(), c: false };
-    this.checkAllVoted(changed);
+    if (cur && cur.o === o) cur.c = true; else g.votes[p.id] = { o, t: Date.now(), c: false };
+    this.checkAllVoted();
   }
 
-  checkAllVoted(changed) {
+  checkAllVoted() {
     const s = this.state, g = s.game;
     const online = s.players.filter(p => p.online);
-    const all = online.length > 0 && online.every(p => g.votes[p.id]);
-    if (!all) { this.t.finalAt = 0; return; }
-    if (online.every(p => g.votes[p.id].c)) { this.resolve(); return; }
-    if (changed || !this.t.finalAt) this.t.finalAt = Date.now() + FINAL_MS;
+    if (online.length > 0 && online.every(p => g.votes[p.id] && g.votes[p.id].c)) this.resolve();
   }
 
   resolve() {
@@ -355,6 +350,15 @@ export class Engine {
   reveal() {
     const s = this.state, g = s.game;
     s.phase = 'reveal';
+    const final = !(g.picked != null && g.picked !== this.answer && g.dbl);
+    if (final) {
+      g.ps = g.ps || {};
+      for (const [pid, v] of Object.entries(g.votes)) {
+        const st = g.ps[pid] || (g.ps[pid] = { ok: 0, n: 0 });
+        st.n++;
+        if (v.o === this.answer) st.ok++;
+      }
+    }
     if (g.picked != null && g.picked === this.answer) {
       g.result = 'ok'; g.correct++; g.answer = this.answer;
       this.t.phaseEnd = Date.now() + REVEAL_OK;
@@ -404,8 +408,7 @@ export class Engine {
     if (!g || s.phase !== 'voting') return;
     const L = g.life[role];
     if (!L || L.used) return;
-    const owner = s.players.find(x => x.id === L.owner);
-    if (L.owner !== p.id && owner && owner.online) return;
+    if (L.owner !== p.id) return;
     switch (role) {
       case 'sabio': {
         const wrong = shuffle([0, 1, 2, 3].filter(i => i !== this.answer && !g.removed.includes(i)));
@@ -438,7 +441,7 @@ export class Engine {
   // =====================================================================
   // Modo competitivo: todos responden las mismas preguntas por su cuenta,
   // nadie queda eliminado, cada acierto paga el valor del escalón y gana
-  // quien junte más. Cada jugador tiene todos los comodines una vez.
+  // quien junte más. Cada jugador tiene solo el comodín de su rol, una vez.
   // Empate al final: muerte súbita entre los empatados.
   // =====================================================================
   isComp() { const g = this.state && this.state.game; return !!(g && g.comp); }
@@ -447,15 +450,17 @@ export class Engine {
     const g = this.state.game;
     this.pAns = {};
     const p = {};
-    for (const r of g.roster) p[r.id] = this.compFresh();
-    g.comp = { p, score: {}, correct: {}, timeMs: {}, sd: null, sdRound: 0, rank: null };
+    const roleOf = {};
+    for (const [role, L] of Object.entries(this.assignRoles())) roleOf[L.owner] = role;
+    for (const r of g.roster) p[r.id] = this.compFresh(roleOf[r.id]);
+    g.comp = { p, role: roleOf, score: {}, correct: {}, timeMs: {}, sd: null, sdRound: 0, rank: null };
     for (const r of g.roster) { g.comp.score[r.id] = 0; g.comp.correct[r.id] = 0; g.comp.timeMs[r.id] = 0; }
     g.life = {};
   }
-  compFresh() {
+  compFresh(role) {
     return {
       o: null, c: false, t: 0, res: null, removed: [], poll: null, hint: null, dbl: false, retry: false, extra: 0, q: null, ans: null,
-      life: { sabio: false, influencer: false, hacker: false, suertudo: false, profesora: false, crono: false },
+      life: role ? { [role]: false } : {},
     };
   }
   // Quién juega la pregunta actual (en muerte súbita, solo los empatados).

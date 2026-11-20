@@ -50,17 +50,42 @@ function dotTex() {
   });
   return dotTexCache;
 }
+// Degradado vertical en escala de grises para alphaMap: opaco abajo, transparente arriba.
+let fadeTexCache = null;
+function fadeTex() {
+  if (!fadeTexCache) {
+    fadeTexCache = canvasTex(4, 128, (g, w, h) => {
+      const gr = g.createLinearGradient(0, 0, 0, h);
+      gr.addColorStop(0, '#000'); gr.addColorStop(0.55, '#555'); gr.addColorStop(1, '#fff');
+      g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    });
+    fadeTexCache.colorSpace = THREE.NoColorSpace;
+    fadeTexCache.userData.shared = true;
+  }
+  return fadeTexCache;
+}
 function disposeTree(obj) {
   obj.traverse(o => {
-    if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose();
+    // Los sprites comparten una geometría interna de three.js: no se libera.
+    if (o.geometry && !o.geometry.userData.shared && !o.isSprite) o.geometry.dispose();
     const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
     for (const m of mats) {
       if (m.userData && m.userData.shared) continue;
-      for (const k of ['map', 'alphaMap', 'emissiveMap']) if (m[k] && m[k] !== dotTexCache) m[k].dispose();
+      for (const k of ['map', 'alphaMap', 'emissiveMap']) if (m[k] && m[k] !== dotTexCache && !m[k].userData.shared) m[k].dispose();
       m.dispose();
     }
   });
 }
+
+// ---------- curvas de animación ----------
+const clamp01 = v => (v < 0 ? 0 : v > 1 ? 1 : v);
+// Muelle amortiguado normalizado: va de 0 a 1 con rebote y termina exactamente en 1.
+const springOut = (k, damp = 6, freq = 10) => (k <= 0 ? 0 : k >= 1 ? 1 : 1 - Math.exp(-damp * k) * Math.cos(freq * k) * (1 - k * k * k * k));
+// Igual pero arrancando con velocidad 0 (sube más suave antes de pasarse y rebotar).
+const springSoft = (k, damp = 4.5, freq = 7) => (k <= 0 ? 0 : k >= 1 ? 1 : 1 - Math.exp(-damp * k) * (Math.cos(freq * k) + (damp / freq) * Math.sin(freq * k)) * (1 - k * k * k * k));
+const easeInBack = (k, s = 1.6) => k * k * ((s + 1) * k - s);
+const easeInOut = k => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+const easeOut = k => 1 - Math.pow(1 - clamp01(k), 3);
 function roundRect(g, x, y, w, h, r) {
   g.beginPath();
   g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
@@ -82,6 +107,80 @@ function textSprite(text, { bg = '#ffffff', fg = '#1a1033', size = 64, pad = 24,
   });
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
   sp.scale.set(height * (w / h), height, 1);
+  return sp;
+}
+
+// Medalla redonda con el puesto (1-4) para el podio de ganadores.
+const BADGE_PAL = [['#fff6c2', '#ffc93c', '#a8740a', '#5a3a00'], ['#ffffff', '#cfd8e3', '#6f7c8c', '#2b3340'], ['#ffe0c2', '#e08a4a', '#7e431a', '#4a2008'], ['#e4dcff', '#8b7cf6', '#3f3488', '#231a5c']];
+function badgeSprite(n) {
+  const S = 256, pal = BADGE_PAL[(n - 1) % BADGE_PAL.length];
+  const tex = canvasTex(S, S, (g) => {
+    const gr = g.createRadialGradient(S * 0.38, S * 0.32, 8, S / 2, S / 2, S / 2);
+    gr.addColorStop(0, pal[0]); gr.addColorStop(0.6, pal[1]); gr.addColorStop(1, pal[2]);
+    g.beginPath(); g.arc(S / 2, S / 2, S / 2 - 10, 0, TAU);
+    g.fillStyle = gr; g.fill();
+    g.lineWidth = 12; g.strokeStyle = '#ffffff'; g.stroke();
+    g.font = `800 168px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    // Cifra oscura con contorno blanco: se lee incluso cuando el bloom ilumina la medalla.
+    g.lineJoin = 'round'; g.lineWidth = 18; g.strokeStyle = '#ffffff';
+    g.strokeText(String(n), S / 2, S / 2 + 12);
+    g.fillStyle = pal[3]; g.fillText(String(n), S / 2, S / 2 + 12);
+  });
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  sp.renderOrder = 3;
+  return sp;
+}
+
+// Bocadillo de cómic: hasta 2 líneas de ~28 caracteres; el ancla del sprite es la punta de la cola.
+function wrapBubble(text, max = 28, maxLines = 2) {
+  const len = s => [...s].length, cut = (s, n) => [...s].slice(0, n).join('');
+  const lines = [];
+  let cur = '';
+  for (let w of String(text).replace(/\s+/g, ' ').trim().split(' ')) {
+    while (len(w) > max) { if (cur) { lines.push(cur); cur = ''; } lines.push(cut(w, max)); w = [...w].slice(max).join(''); }
+    if (!w) continue;
+    if (!cur) cur = w;
+    else if (len(cur) + 1 + len(w) <= max) cur += ' ' + w;
+    else { lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+    const l = lines[maxLines - 1];
+    lines[maxLines - 1] = (len(l) >= max ? cut(l, max - 1) : l) + '…';
+  }
+  return lines;
+}
+function bubbleSprite(text, color) {
+  const lines = wrapBubble(text);
+  const size = 46, lh = 56, padX = 30, padY = 20, tail = 30, bd = 6;
+  const probe = document.createElement('canvas').getContext('2d');
+  probe.font = `700 ${size}px ${FONT}`;
+  const tw = Math.max(90, ...lines.map(l => Math.ceil(probe.measureText(l).width)));
+  const w = tw + padX * 2 + bd * 2, bh = lines.length * lh + padY * 2, h = bh + tail + bd * 2;
+  const tex = canvasTex(w, h, (g) => {
+    const x = bd, y = bd, bw = w - bd * 2, r = Math.min(38, bh / 2), cx = w / 2;
+    g.beginPath();
+    g.moveTo(x + r, y);
+    g.arcTo(x + bw, y, x + bw, y + bh, r);
+    g.arcTo(x + bw, y + bh, x, y + bh, r);
+    g.lineTo(cx + 20, y + bh);
+    g.lineTo(cx + 2, y + bh + tail);
+    g.lineTo(cx - 14, y + bh);
+    g.arcTo(x, y + bh, x, y, r);
+    g.arcTo(x, y, x + bw, y, r);
+    g.closePath();
+    g.fillStyle = '#ffffff'; g.fill();
+    g.lineJoin = 'round'; g.lineWidth = bd; g.strokeStyle = color || '#1a1033'; g.stroke();
+    g.font = `700 ${size}px ${FONT}`; g.fillStyle = '#1a1033'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    lines.forEach((l, i) => g.fillText(l, w / 2, y + padY + lh * (i + 0.5) + size * 0.06));
+  });
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  sp.center.set(0.5, 0);
+  sp.renderOrder = 6;
+  const k = 0.005;
+  sp.userData.size = [w * k, h * k];
+  sp.scale.set(0.001, 0.001, 1);
   return sp;
 }
 
@@ -120,6 +219,26 @@ const THEME_DEF = {
   },
 };
 
+// ---------- podios ----------
+// Medidas de cada estilo: altura de la tapa (donde pisa el avatar), radio del aro de acento y si es un estilo oscuro (brillos aditivos).
+const POD = {
+  gala: { top: 1.12, ring: 0.98, dark: true },
+  juguete: { top: 1.12, ring: 1.05, dark: false },
+  synth: { top: 1.1, ring: 0.98, dark: true },
+  torre: { top: 1.12, ring: 0.88, dark: false },
+};
+const BADGE_SIZE = 0.68;
+const POD_STATES = ['idle', 'voted', 'confirmed', 'correct', 'wrong', 'waiting'];
+// Podio de ganadores: 1.º al centro y más alto, 2.º a la izquierda, 3.º a la derecha, 4.º más a la derecha.
+const RANK_SLOTS = [
+  { x: 0, z: 0.9, extra: 1.4 },
+  { x: -2.6, z: 0.7, extra: 0.8 },
+  { x: 2.6, z: 0.7, extra: 0.4 },
+  { x: 5.0, z: 0.15, extra: 0 },
+];
+const COL_OK = new THREE.Color(0x3ddc84), COL_BAD = new THREE.Color(0xff3b4e), COL_GOLD = new THREE.Color(0xffc93c), COL_WAIT = new THREE.Color(0xffa21f), WHITE = new THREE.Color(0xffffff);
+const avKey = av => { const a = av || {}; return `${a.color}.${a.eyes}.${a.mouth}.${a.hat}`; };
+
 export class Stage {
   constructor(el, { quality = 'auto' } = {}) {
     this.el = el;
@@ -150,6 +269,15 @@ export class Stage {
     this.scene.add(this.world, this.podiumGroup, this.towerGroup, this.fxGroup);
 
     this.podiums = [];
+    this.leaving = [];
+    this.sparks = [];
+    this.ranked = null;
+    this.podiumCX = 0;
+    this.podTheme = null;
+    this.focusId = null;
+    this.focusK = 0;
+    this.focusPos = new V3(0, 4.4, 12.4);
+    this.focusLook = new V3(0, 2.7, 0);
     this.playersKey = '';
     this.ladder = { len: 15, level: 0, safe: [], shown: 0 };
     this.mode = 'home';
@@ -304,6 +432,22 @@ export class Stage {
       cloth.position.y = 0.55;
       g.add(base, cloth);
     }
+    return g;
+  }
+
+  // Columna bajo el podio (altura 1, base en y = 0) que se estira en el podio de ganadores.
+  riserMesh(colorHex) {
+    const c = new THREE.Color(colorHex);
+    const g = new THREE.Group();
+    const t = this.theme;
+    let geo, mat;
+    if (t === 'gala') { geo = new THREE.CylinderGeometry(0.92, 0.92, 1, 6); mat = flat(0x160e36, { roughness: 0.25, metalness: 0.6 }); }
+    else if (t === 'juguete') { geo = new THREE.CylinderGeometry(0.9, 0.9, 1, 12); mat = flat(c.clone().lerp(new THREE.Color(0xffffff), 0.6), { roughness: 0.45 }); }
+    else if (t === 'synth') { geo = new THREE.BoxGeometry(1.3, 1, 1.1); mat = flat(0x0d0020, { roughness: 0.35, metalness: 0.4 }); }
+    else { geo = new THREE.CylinderGeometry(0.8, 0.86, 1, 10); mat = flat(0xd8c4a0, { roughness: 0.9 }); }
+    geo.translate(0, 0.5, 0);
+    g.add(new THREE.Mesh(geo, mat));
+    if (t === 'synth') g.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: c.clone().multiplyScalar(2.5) })));
     return g;
   }
 
@@ -751,18 +895,36 @@ export class Stage {
 
   buildCoin(show) {
     if (!show) { this.coin = null; return; }
-    const faceTex = canvasTex(256, 256, (g, w, h) => {
-      const gr = g.createRadialGradient(w / 2, h / 2, 10, w / 2, h / 2, w / 2);
-      gr.addColorStop(0, '#ffe8a3'); gr.addColorStop(0.7, '#f5b82e'); gr.addColorStop(1, '#b77a0a');
+    const drawFace = (g, w, h) => {
+      g.clearRect(0, 0, w, h);
+      const gr = g.createRadialGradient(w * 0.42, h * 0.38, 20, w / 2, h / 2, w / 2);
+      gr.addColorStop(0, '#fff0b8'); gr.addColorStop(0.6, '#f5b82e'); gr.addColorStop(1, '#b77a0a');
       g.fillStyle = gr; g.fillRect(0, 0, w, h);
-      g.strokeStyle = '#a86d06'; g.lineWidth = 10; g.beginPath(); g.arc(w / 2, h / 2, w / 2 - 20, 0, TAU); g.stroke();
-      g.fillStyle = '#9a6205'; g.font = `800 112px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText('1M', w / 2, h / 2 + 8);
-    });
+      g.strokeStyle = '#a86d06'; g.lineWidth = 18; g.beginPath(); g.arc(w / 2, h / 2, w / 2 - 46, 0, TAU); g.stroke();
+      g.fillStyle = '#b8800c';
+      for (let i = 0; i < 16; i++) { const a = (i / 16) * TAU; g.beginPath(); g.arc(w / 2 + Math.cos(a) * (w / 2 - 22), h / 2 + Math.sin(a) * (h / 2 - 22), 6, 0, TAU); g.fill(); }
+      g.font = `800 224px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = 'rgba(255,242,196,0.8)'; g.fillText('1M', w / 2 + 4, h / 2 + 22);
+      g.fillStyle = '#8f5a04'; g.fillText('1M', w / 2, h / 2 + 16);
+    };
+    const faceTex = canvasTex(512, 512, drawFace);
+    // Si la tipografía aún no había cargado, se vuelve a pintar la cara.
+    if (document.fonts && document.fonts.status !== 'loaded') document.fonts.ready.then(() => { drawFace(faceTex.image.getContext('2d'), 512, 512); faceTex.needsUpdate = true; });
     const gold = new THREE.MeshStandardMaterial({ color: 0xf2b632, metalness: 1, roughness: 0.28 });
     const face = new THREE.MeshStandardMaterial({ map: faceTex, metalness: 0.75, roughness: 0.32 });
-    const coin = new THREE.Mesh(new THREE.CylinderGeometry(1.3, 1.3, 0.24, 32), [gold, face, face]);
-    coin.rotation.x = Math.PI / 2;
+    // Moneda de pie: canto abierto con el eje en Z y dos caras planas con UV estándar
+    // (texto horizontal). La cara trasera gira 180° en Y para que tampoco se vea en espejo.
+    const R = 1.3, H = 0.24;
+    const coin = new THREE.Group();
+    const edgeGeo = new THREE.CylinderGeometry(R, R, H, 48, 1, true);
+    edgeGeo.rotateX(Math.PI / 2);
+    const faceGeo = new THREE.CircleGeometry(R, 48);
+    const lipGeo = new THREE.TorusGeometry(R - 0.05, 0.06, 6, 48);
+    const front = new THREE.Mesh(faceGeo, face); front.position.z = H / 2;
+    const back = new THREE.Mesh(faceGeo, face); back.position.z = -H / 2; back.rotation.y = Math.PI;
+    const lipF = new THREE.Mesh(lipGeo, gold); lipF.position.z = H / 2;
+    const lipB = new THREE.Mesh(lipGeo, gold); lipB.position.z = -H / 2;
+    coin.add(new THREE.Mesh(edgeGeo, gold), front, back, lipF, lipB);
     const holder = new THREE.Group();
     holder.add(coin);
     holder.position.set(0, 5.2, -2.5);
@@ -879,40 +1041,541 @@ export class Stage {
   }
 
   // ---------- podios y avatares ----------
+  // Los podios persisten: sólo se crean (suben del suelo), se reconstruyen (cambia avatar, nombre o estilo)
+  // o se retiran (bajan y se liberan) los que cambian; los demás se deslizan a su nueva posición.
   setPlayers(players) {
-    this.lastPlayers = players;
-    const list = players.slice(0, 4);
-    const key = this.theme + '|' + list.map(p => `${p.id}:${p.av.color}.${p.av.eyes}.${p.av.mouth}.${p.av.hat}:${p.name}`).join(',');
+    this.lastPlayers = players || [];
+    const list = [], seen = new Set();
+    for (const pl of this.lastPlayers) {
+      if (!pl || seen.has(pl.id)) continue;
+      seen.add(pl.id); list.push(pl);
+      if (list.length === 4) break;
+    }
+    const key = this.theme + '|' + list.map(p => `${p.id}:${avKey(p.av)}:${p.name}`).join(',');
     if (key === this.playersKey) return;
     this.playersKey = key;
-    const prevAnims = new Map(this.podiums.map(p => [p.id, p.anim]));
-    for (const p of this.podiums) { p.group.remove(p.avatar); disposeAvatar(p.avatar); disposeTree(p.group); }
-    this.podiumGroup.clear();
-    this.podiums = [];
-    const n = list.length;
-    list.forEach((pl, i) => {
-      const x = (i - (n - 1) / 2) * 2.7;
-      const z = 1.2 - Math.abs(x) * 0.22;
-      const color = AVATAR.colors[pl.av.color % AVATAR.colors.length] || '#ffffff';
-      const group = new THREE.Group();
-      group.position.set(x, this.stageTop, z);
-      group.rotation.y = -x * 0.05;
-      const pod = this.podiumMesh(color);
-      group.add(pod);
-      const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.75, 20), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, map: dotTex(), depthWrite: false }));
-      shadow.rotation.x = -Math.PI / 2; shadow.position.y = 1.13;
-      group.add(shadow);
-      const avatar = buildAvatar(pl.av);
-      avatar.position.y = 1.12;
-      group.add(avatar);
-      const tag = textSprite(pl.name || 'Jugador', { bg: color, fg: this.readableOn(color), size: 56, height: 0.42 });
-      tag.position.set(0, 0.5, 1.05);
-      group.add(tag);
-      this.podiumGroup.add(group);
-      const anim = prevAnims.get(pl.id) || 'idle';
-      setAvatarAnim(avatar, anim);
-      this.podiums.push({ id: pl.id, group, avatar, tag, sign: null, signKey: '', anim, color });
+    const rebuild = this.podTheme !== this.theme;
+    this.podTheme = this.theme;
+    if (rebuild) { for (const p of this.leaving) this.disposePodium(p); this.leaving = []; }
+    const old = new Map(this.podiums.map(p => [p.id, p]));
+    const fresh = [];
+    this.podiums = list.map(pl => {
+      let p = old.get(pl.id);
+      if (!p) { p = this.makePodium(pl); fresh.push(p); return p; }
+      old.delete(pl.id);
+      const cfgChanged = avKey(pl.av) !== p.cfgKey;
+      if (rebuild || cfgChanged) {
+        this.buildPodiumVisual(p, pl);
+        if (cfgChanged && !rebuild && !p.join) this.popAvatar(p, 0);
+      } else if ((pl.name || '') !== p.name) this.buildTag(p, pl.name);
+      return p;
     });
+    for (const p of old.values()) this.startLeave(p);
+    this.layoutPodiums();
+    fresh.forEach((p, i) => {
+      p.x = p.tx; p.z = p.tz;
+      this.startJoin(p, i * 0.14);
+    });
+  }
+
+  makePodium(pl) {
+    const root = new THREE.Group();
+    this.podiumGroup.add(root);
+    const p = {
+      id: pl.id, root, group: root, rise: null, top: null, avatar: null, tag: null, fx: null,
+      sign: null, signKey: '', signText: null, signColor: '#ffffff',
+      anim: 'idle', state: 'idle', stateT0: -99, color: '#ffffff', baseCol: new THREE.Color(), accCol: new THREE.Color(),
+      name: '', cfgKey: '', x: 0, z: 0, vx: 0, vz: 0, tx: 0, tz: 0, extra: 0, ex: null, rank: -1, rk: 0,
+      join: null, leave: null, pop: null, bounce: null, shock: null, spinA: 0, waitA: 0,
+      badge: null, gold: null, bubble: null, events: [], phase: rand(0, TAU), isNew: true,
+    };
+    this.buildPodiumVisual(p, pl);
+    p.accCol.copy(p.baseCol);
+    return p;
+  }
+
+  // Material de brillo: aditivo en estilos oscuros, normal y translúcido en los claros.
+  glowMat(color, o = {}) {
+    return new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, opacity: 0, blending: POD[this.theme].dark ? THREE.AdditiveBlending : THREE.NormalBlending, ...o });
+  }
+
+  // (Re)construye todo lo visual del podio conservando su estado (posición, animaciones, puesto…).
+  buildPodiumVisual(p, pl) {
+    const av = pl.av || {};
+    const M = POD[this.theme];
+    const hadBadge = !!(p.badge && p.badge.out == null);
+    const hadGold = !!(p.gold && p.gold.out == null);
+    const bub = p.bubble ? { text: p.bubble.text, color: p.bubble.color, t0: p.bubble.t0 } : null;
+    if (p.avatar) disposeAvatar(p.avatar);
+    disposeTree(p.root);
+    p.root.clear();
+    p.avatar = null; p.sign = null; p.signKey = ''; p.badge = null; p.gold = null; p.tag = null; p.bubble = null;
+    const color = AVATAR.colors[av.color % AVATAR.colors.length] || '#ffffff';
+    p.color = color; p.baseCol.set(color); p.cfgKey = avKey(av);
+    const add = { transparent: true, depthWrite: false, blending: THREE.AdditiveBlending };
+    // En el suelo: charco de luz de acento y onda expansiva.
+    const pool = new THREE.Mesh(new THREE.CircleGeometry(1.5, 32), this.glowMat(color, { map: dotTex() }));
+    pool.rotation.x = -Math.PI / 2; pool.position.y = 0.025;
+    const shock = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 48), new THREE.MeshBasicMaterial({ color, opacity: 0, side: THREE.DoubleSide, ...add }));
+    shock.rotation.x = -Math.PI / 2; shock.visible = false;
+    const rise = new THREE.Group();
+    p.root.add(pool, shock, rise);
+    const riser = this.riserMesh(color);
+    riser.visible = false;
+    const top = new THREE.Group();
+    rise.add(riser, top);
+    top.add(this.podiumMesh(color));
+    const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.75, 20), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, map: dotTex(), depthWrite: false }));
+    shadow.rotation.x = -Math.PI / 2; shadow.position.y = M.top + 0.01;
+    // Aro de acento propio (igual en todos los estilos) sobre la tapa.
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(M.ring, 0.042, 6, 72), M.dark ? new THREE.MeshBasicMaterial({ color, ...add }) : new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false }));
+    ring.rotation.x = Math.PI / 2; ring.position.y = M.top + 0.035;
+    // Aro giratorio de «confirmado»: tres arcos.
+    const spin = new THREE.Group();
+    spin.visible = false;
+    const arcGeo = new THREE.TorusGeometry(M.ring + 0.16, 0.05, 6, 28, TAU * 0.2);
+    arcGeo.rotateX(Math.PI / 2);
+    const spinMat = this.glowMat(0xffffff);
+    for (let i = 0; i < 3; i++) { const m = new THREE.Mesh(arcGeo, spinMat); m.rotation.y = (i * TAU) / 3; spin.add(m); }
+    // Columna de luz para los destellos de acierto/fallo.
+    const pillarGeo = new THREE.CylinderGeometry(M.ring * 0.9, M.ring, 3.4, 32, 1, true);
+    pillarGeo.translate(0, 1.7, 0);
+    const pillar = new THREE.Mesh(pillarGeo, this.glowMat(color, { alphaMap: fadeTex(), side: THREE.DoubleSide, fog: false }));
+    pillar.position.y = M.top; pillar.visible = false;
+    top.add(shadow, ring, spin, pillar);
+    const avatar = buildAvatar(av);
+    avatar.position.y = M.top;
+    top.add(avatar);
+    setAvatarAnim(avatar, p.anim);
+    p.rise = rise; p.top = top; p.avatar = avatar;
+    p.fx = { pool, shock, riser, shadow, ring, spin, spinMat, pillar };
+    this.buildTag(p, pl.name);
+    if (p.signText) this.applySign(p, p.signText, p.signColor);
+    if (hadBadge && p.rank >= 0) this.addBadge(p, null);
+    if (hadGold) { this.addGold(p); p.gold.t0 = -99; }
+    if (bub) { this.makeBubble(p, bub.text, bub.color); p.bubble.t0 = bub.t0; }
+  }
+
+  // Bocadillo de cómic sobre la cabeza (~3 s). Uno nuevo reemplaza al anterior del mismo jugador.
+  say(id, text, color = '#1a1033') {
+    const p = this.podiums.find(x => x.id === id);
+    if (!p) return;
+    this.dropBubble(p);
+    const str = String(text ?? '').trim();
+    if (str) this.makeBubble(p, str, color);
+  }
+  makeBubble(p, text, color) {
+    const sp = bubbleSprite(text, color);
+    const M = POD[this.theme];
+    if (M.dark) sp.material.color.setScalar(0.8);
+    const y = M.top + (p.sign ? 3.32 : 2.8);
+    sp.position.set(0, y, 0.15);
+    p.top.add(sp);
+    p.bubble = { sp, text, color, t0: this.time, y };
+  }
+  dropBubble(p) {
+    const B = p.bubble;
+    if (!B) return;
+    B.sp.parent?.remove(B.sp); B.sp.material.map.dispose(); B.sp.material.dispose();
+    p.bubble = null;
+  }
+
+  // Acerca poco a poco la cámara del juego (plano 'wide') al podio de ese jugador; null vuelve al plano normal.
+  focus(id) {
+    if (id == null) { this.focusId = null; return; }
+    if (this.podiums.some(p => p.id === id)) this.focusId = id;
+  }
+
+  buildTag(p, name) {
+    if (p.tag) { p.tag.parent?.remove(p.tag); p.tag.material.map.dispose(); p.tag.material.dispose(); }
+    p.name = name || '';
+    const tag = textSprite(name || 'Jugador', { bg: p.color, fg: this.readableOn(p.color), size: 56, height: 0.42 });
+    tag.position.set(0, lerp(0.5, 0.22, p.rk), 1.05);
+    p.rise.add(tag);
+    p.tag = tag;
+  }
+
+  disposePodium(p) {
+    if (p.avatar) { disposeAvatar(p.avatar); p.avatar = null; }
+    disposeTree(p.root);
+    this.podiumGroup.remove(p.root);
+    p.sign = null; p.badge = null; p.gold = null; p.tag = null; p.bubble = null;
+  }
+
+  // Posiciones objetivo: fila normal o podio de ganadores.
+  layoutPodiums() {
+    const list = this.podiums;
+    if (this.ranked) {
+      const present = new Map(list.map(p => [p.id, p]));
+      // Quien llega durante el podio ocupa el primer hueco libre.
+      for (const p of list) {
+        if (this.ranked.includes(p.id)) continue;
+        const hole = this.ranked.findIndex(id => !present.has(id));
+        if (hole >= 0) this.ranked[hole] = p.id; else this.ranked.push(p.id);
+      }
+      const xs = [];
+      this.ranked.forEach((id, r) => {
+        const p = present.get(id);
+        if (!p) return;
+        const s = RANK_SLOTS[Math.min(r, RANK_SLOTS.length - 1)];
+        p.tx = s.x; p.tz = s.z; xs.push(s.x);
+        if (p.rank !== r) {
+          p.rank = r;
+          if (p.isNew) { p.extra = s.extra; this.addBadge(p, null); }
+          else { this.tweenExtra(p, s.extra, 0, 0.6, easeInOut); this.addBadge(p, this.time); }
+        }
+      });
+      this.podiumCX = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 4 : 0;
+    } else {
+      const n = list.length;
+      list.forEach((p, i) => {
+        const x = (i - (n - 1) / 2) * 2.7;
+        p.tx = x; p.tz = 1.2 - Math.abs(x) * 0.22;
+      });
+    }
+    for (const p of list) p.isNew = false;
+  }
+
+  tweenExtra(p, to, delay, dur, ease) { p.ex = { from: p.extra, to, t0: this.time + delay, dur, ease }; }
+  at(p, time, fn) { p.events.push({ at: time, fn }); }
+
+  startJoin(p, delay = 0) {
+    const t0 = this.time + delay;
+    p.join = { t0 };
+    p.pop = { t0: t0 + 0.42, fired: false };
+    p.shock = { t0, top: false, col: p.baseCol };
+  }
+  popAvatar(p, delay = 0) { p.pop = { t0: this.time + delay, fired: false }; }
+
+  startLeave(p) {
+    // w0: reloj real, para retirarlo aunque la pestaña haya estado en segundo plano (pocos cuadros).
+    p.leave = { t0: this.time, w0: performance.now(), y0: p.rise ? p.rise.position.y : 0 };
+    p.events = []; p.join = null; p.pop = null;
+    if (p.sign) this.applySign(p, null);
+    this.leaving.push(p);
+  }
+
+  // Posición en el mundo de la tapa del podio (los pies del avatar), más `up`.
+  podiumTopPos(p, up = 0) {
+    return new V3(p.x, this.stageTop + (p.rise ? p.rise.position.y : 0) + Math.max(0, p.extra) + POD[this.theme].top + up, p.z);
+  }
+
+  // Estado visual del podio: 'idle' | 'voted' | 'confirmed' | 'correct' | 'wrong'. id '*' = todos.
+  setPodiumState(id, state) {
+    if (id === '*') { for (const p of this.podiums) this.setPodiumState(p.id, state); return; }
+    const p = this.podiums.find(x => x.id === id);
+    if (!p) return;
+    const s = POD_STATES.includes(state) ? state : 'idle';
+    if (p.state === s) return;
+    p.state = s;
+    p.stateT0 = this.time;
+    if (s === 'voted' && !this.reduceMotion) p.bounce = { t0: this.time, amp: 0.3 };
+    if (s === 'correct' || s === 'wrong') {
+      const c = s === 'correct' ? COL_OK : COL_BAD;
+      p.accCol.copy(c);
+      p.shock = { t0: this.time, top: true, col: c };
+      if (s === 'correct') this.spawnSparkles(this.podiumTopPos(p, 0.4), c, 14, 0.8);
+    }
+  }
+
+  addBadge(p, at) {
+    const n = p.rank + 1;
+    if (n < 1) return;
+    if (p.badge && p.badge.n === n && p.badge.out == null) return;
+    this.dropBadge(p, true);
+    const sp = badgeSprite(n);
+    if (POD[this.theme].dark) sp.material.color.setScalar(0.72);
+    sp.position.set(0, POD[this.theme].top - 0.4, 1.12);
+    sp.scale.setScalar(at == null ? BADGE_SIZE : 0.001);
+    p.top.add(sp);
+    p.badge = { sp, n, t0: at == null ? -99 : at, out: null };
+  }
+  dropBadge(p, now) {
+    const b = p.badge;
+    if (!b) return;
+    if (now) { b.sp.parent?.remove(b.sp); b.sp.material.map.dispose(); b.sp.material.dispose(); p.badge = null; }
+    else if (b.out == null) b.out = this.time;
+  }
+
+  // Brillo dorado del 1.º: cono de luz, halo, disco y chispas que orbitan.
+  addGold(p) {
+    if (p.gold) return;
+    const M = POD[this.theme];
+    const g = new THREE.Group();
+    const coneGeo = new THREE.CylinderGeometry(0.32, 1.5, 7.5, 32, 1, true);
+    coneGeo.translate(0, 3.75, 0);
+    const cone = new THREE.Mesh(coneGeo, this.glowMat(COL_GOLD, { alphaMap: fadeTex(), side: THREE.DoubleSide, fog: false }));
+    cone.position.y = M.top;
+    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTex(), color: COL_GOLD, opacity: 0, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    halo.position.set(0, M.top + 1.15, -0.45);
+    halo.scale.setScalar(3.4);
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(1.3, 32), this.glowMat(COL_GOLD, { map: dotTex() }));
+    disc.rotation.x = -Math.PI / 2; disc.position.y = M.top + 0.05;
+    const N = this.quality === 'baja' ? 24 : 48;
+    const seeds = [];
+    for (let i = 0; i < N; i++) seeds.push({ a: rand(0, TAU), r: rand(0.95, 1.6), h: rand(0, 3), s: rand(0.5, 1.2) * (i % 2 ? 1 : -1) });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+    const pts = new THREE.Points(geo, new THREE.PointsMaterial({ color: new THREE.Color(0xffe08a).multiplyScalar(M.dark ? 1.8 : 1.2), size: 0.16, map: dotTex(), opacity: 0, transparent: true, depthWrite: false, blending: M.dark ? THREE.AdditiveBlending : THREE.NormalBlending }));
+    pts.frustumCulled = false;
+    pts.position.y = M.top;
+    g.add(cone, halo, disc, pts);
+    p.top.add(g);
+    p.gold = { g, cone, halo, disc, pts, seeds, t0: this.time, out: null };
+  }
+
+  // Convierte los podios actuales en el podio de ganadores (rankedIds: del 1.º al último).
+  showPodium(rankedIds = []) {
+    const byId = new Map(this.podiums.map(p => [p.id, p]));
+    const ids = [];
+    for (const id of rankedIds || []) if (byId.has(id) && !ids.includes(id)) ids.push(id);
+    for (const p of this.podiums) if (!ids.includes(p.id)) ids.push(p.id);
+    this.ranked = ids.slice(0, RANK_SLOTS.length);
+    const n = this.ranked.length, now = this.time, rm = this.reduceMotion;
+    if (!n) { this.podiumCX = 0; return; }
+    const xs = [];
+    this.ranked.forEach((id, r) => {
+      const p = byId.get(id);
+      const s = RANK_SLOTS[r];
+      const first = r === 0;
+      p.rank = r; p.tx = s.x; p.tz = s.z; xs.push(s.x);
+      p.events = [];
+      p.state = 'idle'; p.stateT0 = now;
+      if (p.gold && p.gold.out == null && !first) p.gold.out = now;
+      // Suben escalonados: 4.º, 3.º, 2.º y por último el 1.º con un gran rebote.
+      const delay = rm ? 0.1 : first ? 0.25 + (n - 1) * 0.26 + 0.1 : 0.25 + (n - 1 - r) * 0.26;
+      const dur = first ? 1.0 : 0.7;
+      this.tweenExtra(p, s.extra, delay, dur, rm ? easeOut : first ? (k => springSoft(k, 3.6, 8)) : (k => springSoft(k, 5, 9)));
+      if (p.badge && p.badge.n !== r + 1) this.dropBadge(p, true);
+      this.addBadge(p, now + delay);
+      if (s.extra === 0 && !rm) this.at(p, now + delay, () => { p.bounce = { t0: this.time, amp: 0.3 }; });
+      this.at(p, now + delay + 0.05, () => this.spawnSparkles(this.podiumTopPos(p, 0.2), first ? COL_GOLD : p.baseCol, 12, 0.7));
+      if (first) this.at(p, now + delay + dur * 0.3, () => {
+        this.addGold(p);
+        p.shock = { t0: this.time, top: true, col: COL_GOLD };
+        this.spawnSparkles(this.podiumTopPos(p, 1.0), COL_GOLD, 40, 1.3);
+      });
+      this.setAnim(id, first ? 'dance' : 'happy');
+    });
+    this.podiumCX = (Math.min(...xs) + Math.max(...xs)) / 4;
+  }
+
+  // Vuelve suavemente a la fila normal y a la altura de siempre.
+  clearPodium() {
+    if (!this.ranked) return;
+    this.ranked = null;
+    for (const p of this.podiums) {
+      p.rank = -1; p.events = [];
+      this.tweenExtra(p, 0, 0, this.reduceMotion ? 0.3 : 0.75, easeInOut);
+      this.dropBadge(p, false);
+      if (p.gold && p.gold.out == null) p.gold.out = this.time;
+    }
+    this.layoutPodiums();
+    this.setAllAnim('idle');
+    if (this.shot === 'podium') this.shot = 'wide';
+  }
+
+  spawnSparkles(pos, color, n = 16, power = 1) {
+    if (this.reduceMotion) return;
+    const dark = POD[this.theme].dark;
+    const arr = new Float32Array(n * 3), vel = [];
+    for (let i = 0; i < n; i++) {
+      arr[i * 3] = pos.x; arr[i * 3 + 1] = pos.y; arr[i * 3 + 2] = pos.z;
+      const a = rand(0, TAU), out = rand(0.6, 2.2) * power;
+      vel.push(new V3(Math.cos(a) * out, rand(1.2, 3.4) * power, Math.sin(a) * out));
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    const c = new THREE.Color(color).lerp(WHITE, 0.3).multiplyScalar(dark ? 2 : 1.2);
+    const pts = new THREE.Points(geo, new THREE.PointsMaterial({ color: c, size: 0.2, map: dotTex(), transparent: true, depthWrite: false, blending: dark ? THREE.AdditiveBlending : THREE.NormalBlending }));
+    pts.frustumCulled = false;
+    this.fxGroup.add(pts);
+    this.sparks.push({ pts, vel, t: 0, life: 1.0 });
+  }
+  updateSparks(dt) {
+    if (!this.sparks.length) return;
+    const drag = Math.pow(0.2, dt);
+    this.sparks = this.sparks.filter(s => {
+      s.t += dt;
+      const a = s.pts.geometry.attributes.position.array;
+      s.vel.forEach((v, i) => { v.y -= 4 * dt; v.multiplyScalar(drag); a[i * 3] += v.x * dt; a[i * 3 + 1] += v.y * dt; a[i * 3 + 2] += v.z * dt; });
+      s.pts.geometry.attributes.position.needsUpdate = true;
+      const k = s.t / s.life;
+      s.pts.material.opacity = Math.max(0, 1 - k * k);
+      s.pts.material.size = 0.2 * (1 - k * 0.5);
+      if (k >= 1) { this.fxGroup.remove(s.pts); s.pts.geometry.dispose(); s.pts.material.dispose(); return false; }
+      return true;
+    });
+  }
+
+  updatePodium(p, t, dt) {
+    const M = POD[this.theme];
+    const fx = p.fx;
+    if (p.events.length) {
+      const due = p.events.filter(e => t >= e.at);
+      if (due.length) { p.events = p.events.filter(e => t < e.at); for (const e of due) e.fn(); }
+    }
+    // Deslizamiento suave (muelle críticamente amortiguado) hacia la posición objetivo.
+    const w = 7.5;
+    p.vx += (-(w * w) * (p.x - p.tx) - 2 * w * p.vx) * dt; p.x += p.vx * dt;
+    p.vz += (-(w * w) * (p.z - p.tz) - 2 * w * p.vz) * dt; p.z += p.vz * dt;
+    p.root.position.set(p.x, this.stageTop, p.z);
+    p.root.rotation.y = -p.x * 0.05;
+    // Altura extra (podio de ganadores).
+    if (p.ex && t >= p.ex.t0) {
+      const k = clamp01((t - p.ex.t0) / p.ex.dur);
+      p.extra = p.ex.from + (p.ex.to - p.ex.from) * p.ex.ease(k);
+      if (k >= 1) { p.extra = p.ex.to; p.ex = null; }
+    }
+    const ex = Math.max(0, p.extra);
+    // Entrada (sube con rebote desde debajo del escenario) y salida (se hunde).
+    const depth = M.top + ex + 0.5;
+    let ry = 0, appear = 1;
+    if (p.join) {
+      const k = (t - p.join.t0) / 0.8;
+      if (k >= 1) p.join = null;
+      else {
+        const e = k <= 0 ? 0 : this.reduceMotion ? easeOut(k) : springSoft(k, 4.5, 7);
+        ry = -depth * (1 - e);
+        appear = clamp01(k * 1.5);
+      }
+    }
+    if (p.leave) {
+      const k = clamp01((t - p.leave.t0) / 0.5);
+      ry = lerp(p.leave.y0, -depth, this.reduceMotion ? easeInOut(k) : easeInBack(k, 1.4));
+      appear = 1 - k;
+    }
+    let by = 0;
+    if (p.bounce) {
+      const k = t - p.bounce.t0;
+      if (k > 0.7) p.bounce = null;
+      else if (k > 0) by = p.bounce.amp * Math.exp(-6.5 * k) * Math.sin(k * 15);
+    }
+    // 'waiting': vaivén lento hacia arriba.
+    p.waitA += ((p.state === 'waiting' ? 1 : 0) - p.waitA) * (1 - Math.exp(-dt * 5));
+    if (p.waitA > 0.001 && !this.reduceMotion) by += p.waitA * 0.12 * (0.5 - 0.5 * Math.cos(t * 2.4 + p.phase));
+    p.rise.position.y = ry + by;
+    p.top.position.y = ex;
+    fx.riser.visible = ex > 0.01;
+    fx.riser.scale.y = Math.max(0.001, ex);
+    // Avatar: aparece con rebote y chispas; se encoge al irse.
+    let as = 1;
+    if (p.pop) {
+      const k = (t - p.pop.t0) / 0.55;
+      if (k < 0) as = 0;
+      else {
+        if (!p.pop.fired) { p.pop.fired = true; this.spawnSparkles(this.podiumTopPos(p, 0.9), p.baseCol, 16, 0.75); }
+        if (k >= 1) p.pop = null;
+        else as = this.reduceMotion ? easeOut(k) : springOut(k, 6, 13);
+      }
+    }
+    if (p.leave) as = Math.min(as, 1 - clamp01((t - p.leave.t0) / 0.28));
+    p.avatar.scale.setScalar(Math.max(0.001, as));
+    p.avatar.visible = as > 0.002;
+    fx.shadow.material.opacity = 0.28 * clamp01(as);
+    updateAvatar(p.avatar, dt, t);
+    // Nombre: baja un poco en el podio de ganadores para dejar sitio a la medalla.
+    p.rk += ((p.rank >= 0 ? 1 : 0) - p.rk) * (1 - Math.exp(-dt * 6));
+    p.tag.position.y = lerp(0.5, 0.22, p.rk);
+    p.tag.material.opacity = p.leave ? appear : 1;
+    // Luz de acento: pulso suave en reposo, más intensa según el estado.
+    const st = p.state, age = t - p.stateT0;
+    let base = 0.55, amp = 0.2;
+    if (st === 'voted') { base = 1.0; amp = 0.1; }
+    else if (st === 'confirmed') { base = 1.45; amp = 0; }
+    else if (st === 'correct') { base = 1.15; amp = 0.1; }
+    else if (st === 'wrong') { base = 0.95; amp = 0.1; }
+    else if (st === 'waiting') { const bl = 0.5 + 0.5 * Math.sin(t * TAU * 2); base = 0.3 + 1.3 * bl * bl; amp = 0; }
+    const flash = st === 'correct' || st === 'wrong' ? Math.exp(-age * 2.6) * (0.7 + 0.3 * Math.cos(age * 20)) : 0;
+    const kick = st === 'voted' ? Math.exp(-age * 5) * 0.9 : 0;
+    const I = base * (1 + amp * Math.sin(t * 2.3 + p.phase)) + flash * 1.8 + kick;
+    const tgt = st === 'correct' ? COL_OK : st === 'wrong' ? COL_BAD : st === 'waiting' ? COL_WAIT : p.gold && p.gold.out == null ? COL_GOLD : p.baseCol;
+    p.accCol.lerp(tgt, 1 - Math.exp(-dt * 9));
+    fx.ring.material.color.copy(p.accCol).multiplyScalar(M.dark ? I * 1.7 : 0.75 + 0.35 * I);
+    fx.ring.material.opacity = (M.dark ? 1 : clamp01(0.45 + 0.4 * I)) * appear;
+    fx.ring.scale.setScalar(1 + flash * 0.1 + kick * 0.06);
+    fx.pool.material.color.copy(p.accCol);
+    fx.pool.material.opacity = clamp01(0.1 + 0.17 * I) * appear * (M.dark ? 1 : 0.7);
+    const pv = flash * 0.6;
+    fx.pillar.visible = pv > 0.01;
+    if (fx.pillar.visible) {
+      fx.pillar.material.color.copy(p.accCol).multiplyScalar(M.dark ? 1.6 : 1);
+      fx.pillar.material.opacity = pv;
+      fx.pillar.scale.set(1, 0.4 + 0.6 * clamp01(age * 4), 1);
+    }
+    p.spinA += ((st === 'confirmed' ? 1 : 0) - p.spinA) * (1 - Math.exp(-dt * 8));
+    fx.spin.visible = p.spinA > 0.01;
+    if (fx.spin.visible) {
+      fx.spin.rotation.y = t * 2.4;
+      fx.spin.position.y = M.top + 0.24 + Math.sin(t * 3) * 0.05;
+      fx.spin.scale.setScalar(1 + (1 - p.spinA) * 0.4);
+      fx.spinMat.color.copy(p.accCol).lerp(WHITE, 0.35).multiplyScalar(M.dark ? 2 : 1.1);
+      fx.spinMat.opacity = p.spinA * appear;
+    }
+    if (p.shock) {
+      const k = (t - p.shock.t0) / 0.7;
+      if (k >= 1) { p.shock = null; fx.shock.visible = false; }
+      else if (k < 0) fx.shock.visible = false;
+      else {
+        fx.shock.visible = true;
+        fx.shock.position.y = p.shock.top ? p.rise.position.y + ex + M.top + 0.04 : 0.03;
+        fx.shock.scale.setScalar(0.7 + easeOut(k) * 1.5);
+        fx.shock.material.color.copy(p.shock.col || p.accCol).multiplyScalar(M.dark ? 1.8 : 1);
+        fx.shock.material.opacity = (1 - k) * 0.85;
+      }
+    }
+    if (p.sign) {
+      const sa = t - p.sign.userData.born;
+      p.sign.position.y = 4.0 + Math.sin(t * 3) * 0.05;
+      p.sign.material.opacity = Math.min(1, sa * 5) * appear;
+    }
+    const B = p.bubble;
+    if (B) {
+      const age = t - B.t0;
+      if (age > 3.4) this.dropBubble(p);
+      else {
+        const s = age < 0.45 ? (this.reduceMotion ? easeOut(age / 0.45) : springOut(age / 0.45, 6, 12)) : 1;
+        const [bw, bh] = B.sp.userData.size;
+        B.sp.scale.set(Math.max(0.001, bw * s), Math.max(0.001, bh * s), 1);
+        B.sp.material.opacity = clamp01(age > 3 ? 1 - (age - 3) / 0.4 : 1) * appear;
+        // Por encima del cartel de voto si lo hay.
+        B.y += (M.top + (p.sign ? 3.32 : 2.8) - B.y) * (1 - Math.exp(-dt * 10));
+        B.sp.position.y = B.y + Math.sin(t * 2.2 + p.phase) * 0.03;
+      }
+    }
+    const b = p.badge;
+    if (b) {
+      let s;
+      if (b.out != null) {
+        const k = (t - b.out) / 0.3;
+        if (k >= 1) { this.dropBadge(p, true); s = 0; } else s = BADGE_SIZE * (1 - easeOut(k));
+      } else {
+        const k = (t - b.t0) / 0.5;
+        s = k < 0 ? 0 : BADGE_SIZE * (this.reduceMotion ? easeOut(k) : springOut(k, 6, 12));
+      }
+      if (p.badge) p.badge.sp.scale.setScalar(Math.max(0.001, s));
+    }
+    const G = p.gold;
+    if (G) {
+      let a = clamp01((t - G.t0) / 0.6);
+      if (G.out != null) {
+        const k = clamp01((t - G.out) / 0.5);
+        a *= 1 - k;
+        if (k >= 1) { G.g.parent?.remove(G.g); disposeTree(G.g); p.gold = null; return; }
+      }
+      const fl = 0.85 + 0.15 * Math.sin(t * 3.1);
+      G.cone.material.opacity = (M.dark ? 0.16 : 0.3) * a * fl;
+      G.halo.material.opacity = 0.55 * a * fl;
+      G.halo.scale.setScalar(3.2 + Math.sin(t * 2) * 0.2);
+      G.disc.material.opacity = (M.dark ? 0.6 : 0.85) * a;
+      G.pts.material.opacity = a;
+      const arr = G.pts.geometry.attributes.position.array;
+      G.seeds.forEach((s, i) => {
+        const ang = s.a + t * s.s, h = (s.h + t * 0.45) % 3;
+        arr[i * 3] = Math.cos(ang) * s.r; arr[i * 3 + 1] = h; arr[i * 3 + 2] = Math.sin(ang) * s.r;
+      });
+      G.pts.geometry.attributes.position.needsUpdate = true;
+    }
   }
 
   readableOn(hex) {
@@ -930,23 +1593,26 @@ export class Stage {
   // Cartelito sobre la cabeza con la letra votada.
   setSign(id, text, color = '#ffffff') {
     const p = this.podiums.find(x => x.id === id);
-    if (!p) return;
+    if (p) this.applySign(p, text, color);
+  }
+  applySign(p, text, color = '#ffffff') {
     const key = text ? text + color : '';
     if (key === p.signKey) return;
     p.signKey = key;
-    if (p.sign) { p.group.remove(p.sign); p.sign.material.map.dispose(); p.sign.material.dispose(); p.sign = null; }
+    p.signText = text || null; p.signColor = color;
+    if (p.sign) { p.sign.parent?.remove(p.sign); p.sign.material.map.dispose(); p.sign.material.dispose(); p.sign = null; }
     if (!text) return;
     const sp = textSprite(text, { bg: color, fg: this.readableOn(color), size: 72, height: 0.62, radius: 40, border: '#ffffff' });
     sp.position.set(0, 4.0, 0);
     sp.userData.born = this.time;
-    p.group.add(sp);
+    p.top.add(sp);
     p.sign = sp;
   }
 
   react(id, emoji) {
     const p = this.podiums.find(x => x.id === id);
     const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: emojiTex(emoji), transparent: true, depthWrite: false }));
-    const base = p ? p.group.position.clone().add(new V3(rand(-0.3, 0.3), 3.6, 0.2)) : new V3(rand(-3, 3), 4, 1);
+    const base = p ? this.podiumTopPos(p, 2.48).add(new V3(rand(-0.3, 0.3), 0, 0.2)) : new V3(rand(-3, 3), 4, 1);
     sp.position.copy(base);
     sp.scale.setScalar(0.01);
     this.fxGroup.add(sp);
@@ -1057,6 +1723,13 @@ export class Stage {
   cameraTarget(t) {
     const pos = new V3(), look = new V3(0, 2.5, 0);
     const far = this.portrait ? 1.35 : 1;
+    if (this.shot === 'podium' && this.ranked) {
+      // Podio de ganadores: un poco desde abajo, con vaivén lento.
+      const cx = this.podiumCX || 0, sw = this.reduceMotion ? 0 : 1;
+      pos.set(cx + Math.sin(t * 0.21) * 1.3 * sw, 2.2 + Math.sin(t * 0.13) * 0.18 * sw, 10.6 * far);
+      look.set(cx, 3.2, 0.3);
+      return { pos, look };
+    }
     if (this.mode === 'home') {
       const a = t * 0.07;
       pos.set(Math.sin(a) * 15.5 * far, 5.6, Math.cos(a) * 15.5 * far);
@@ -1070,7 +1743,9 @@ export class Stage {
         case 'reveal': pos.set(0, 4.6, 11.2 * far); look.set(0, 2.9, 0); break;
         case 'over': { const a = t * 0.12; pos.set(Math.sin(a) * 13 * far, 5.4, Math.cos(a) * 13 * far); look.set(0, 3, 0); break; }
         case 'tower': pos.set(this.theme === 'torre' ? 3 : 3.5, 6, 11 * far); look.set(this.theme === 'torre' ? 0 : 5, 5, -4); break;
-        default: pos.set(Math.sin(t * 0.18) * 1.4, 4.4, 12.4 * far); look.set(0, 2.7, 0);
+        default:
+          pos.set(Math.sin(t * 0.18) * 1.4, 4.4, 12.4 * far); look.set(0, 2.7, 0);
+          if (this.shot === 'wide' && this.focusK > 0.001) { pos.lerp(this.focusPos, this.focusK); look.lerp(this.focusLook, this.focusK); }
       }
     }
     return { pos, look };
@@ -1080,6 +1755,15 @@ export class Stage {
     const dt = Math.min(0.05, this.clock.getDelta());
     this.time += dt;
     const t = this.time;
+    // Enfoque lento sobre un jugador (sólo en el plano 'wide' del juego).
+    const fp = this.focusId != null && this.mode === 'game' && this.shot === 'wide' ? this.podiums.find(p => p.id === this.focusId) : null;
+    if (fp) {
+      const far = this.portrait ? 1.35 : 1, ty = this.stageTop + Math.max(0, fp.extra) + POD[this.theme].top;
+      // Acercamiento suave (~20 %) que deja ver la cabeza, el letrero y el globo de diálogo.
+      this.focusLook.set(fp.x * 0.6, ty + 2.5, fp.z);
+      this.focusPos.set(fp.x * 0.5 + (this.reduceMotion ? 0 : Math.sin(t * 0.18) * 0.4), 4.9 + Math.max(0, fp.extra) * 0.5, fp.z + (12.4 * far - fp.z) * 0.88);
+    }
+    this.focusK += ((fp ? 1 : 0) - this.focusK) * (1 - Math.exp(-dt * 1.4));
     // Cámara suave
     const { pos, look } = this.cameraTarget(t);
     const k = 1 - Math.pow(0.02, dt);
@@ -1098,17 +1782,18 @@ export class Stage {
       this.applyFraming();
     }
     for (const u of this.updaters) u(t, dt);
-    for (const p of this.podiums) {
-      updateAvatar(p.avatar, dt, t);
-      if (p.sign) {
-        const age = t - p.sign.userData.born;
-        const s = Math.min(1, age * 5);
-        p.sign.position.y = 4.0 + Math.sin(t * 3) * 0.05;
-        p.sign.material.opacity = s;
-      }
-    }
+    for (const p of this.podiums) this.updatePodium(p, t, dt);
+    if (this.leaving.length) this.leaving = this.leaving.filter(p => {
+      this.updatePodium(p, t, dt);
+      if (t - p.leave.t0 < 0.55 && performance.now() - p.leave.w0 < 900) return true;
+      this.disposePodium(p);
+      return false;
+    });
+    this.updateSparks(dt);
     if (this.coin) {
-      this.coin.visible = this.mode !== 'game';
+      // Moneda siempre de pie: sólo gira sobre el eje vertical y flota suavemente.
+      this.coin.visible = this.mode !== 'game' && !this.ranked;
+      this.coin.rotation.set(0, 0, 0);
       this.coin.rotation.y = t * 1.2;
       this.coin.position.y = 5.2 + Math.sin(t * 1.4) * 0.22;
     }

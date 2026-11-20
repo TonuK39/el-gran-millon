@@ -41,12 +41,17 @@
       <div class="card home-card">
         <div id="invite-banner" class="invite-banner hidden"></div>
         <label class="sr-only" for="name-input">Tu nombre</label>
-        <input id="name-input" class="input name-input" maxlength="16" placeholder="Escribe tu nombre" autocomplete="off" spellcheck="false">
+        <input id="name-input" class="input name-input" maxlength="16" placeholder="Escribe tu nombre" autocomplete="off" spellcheck="false" required>
+        <p class="name-error hidden" id="name-error">✍️ Escribe tu nombre para jugar</p>
 
         <div class="avatar-maker">
-          <canvas id="avatar-preview" width="200" height="200" aria-label="Vista previa de tu avatar"></canvas>
+          <div class="am-side" id="am-left"></div>
+          <div class="am-center">
+            <canvas id="avatar-preview" width="200" height="200" aria-label="Vista previa de tu avatar"></canvas>
+            <div class="am-caption" id="am-caption">Personaliza tu avatar</div>
+          </div>
+          <div class="am-side" id="am-right"></div>
           <button id="avatar-random" class="icon-btn dice" title="Avatar aleatorio" aria-label="Avatar aleatorio">🎲</button>
-          <div class="am-rows" id="am-rows"></div>
         </div>
 
         <button id="btn-play" class="btn btn-big btn-go">¡Jugar!</button>
@@ -79,26 +84,29 @@
         <ul id="lobby-list" class="player-list"></ul>
         <div class="invite">
           <div class="code-box">Sala <b id="room-code">-----</b></div>
-          <button id="btn-copy" class="btn btn-small btn-alt">🔗 Copiar invitación</button>
+          <button id="btn-copy" class="btn btn-small btn-alt">🔗 Invitar amigos</button>
         </div>
       </div>
 
       <div class="card lobby-settings">
         <div class="card-head">
-          <h2>Ajustes de la partida</h2>
+          <h2>Partida</h2>
           <span id="host-note" class="muted small"></span>
         </div>
+        <button type="button" class="settings-summary" id="settings-summary" aria-expanded="false"></button>
         <div id="settings-form" class="settings-form"></div>
-        <h3 class="sub-head">Elige tu rol <span class="muted small">· cada rol trae un comodín</span></h3>
+        <div class="role-head"><b>Tu rol</b> <span class="muted small">· un comodín por persona</span></div>
         <div id="role-picker" class="role-picker"></div>
+        <p class="role-hint muted small" id="role-hint"></p>
         <div class="lobby-actions">
-          <button id="btn-leave" class="btn btn-ghost">Salir</button>
-          <button id="btn-start" class="btn btn-big btn-go">¡Empezar!</button>
+          <button id="btn-leave" class="btn btn-ghost btn-small">Salir</button>
           <p id="wait-host" class="muted wait-host hidden">Esperando a que el anfitrión empiece…</p>
+          <button id="btn-start" class="btn btn-big btn-go">¡Empezar!</button>
         </div>
       </div>
 
       <div class="card lobby-chat" id="chat-slot-lobby"></div>
+      <button class="icon-btn lobby-chat-btn" id="btn-chat-lobby" aria-label="Abrir chat" title="Chat">💬</button>
     </div>
   </section>
 
@@ -121,6 +129,8 @@
       </div>
     </div>
 
+    <div id="wait-banner" class="wait-banner hidden" aria-live="polite"></div>
+    <div id="phrases" class="phrases card hidden" role="menu" aria-label="Frases rápidas"></div>
     <aside class="lifelines" id="lifelines" aria-label="Comodines"></aside>
     <aside class="ladder" id="ladder" aria-label="Escalera de premios"></aside>
 
@@ -131,10 +141,10 @@
         <div class="q-extra" id="q-extra"></div>
       </div>
       <div class="answers" id="answers">
-        <button class="answer" data-i="0"><span class="letter">A</span><span class="txt"></span><span class="pct"></span><span class="voters"></span></button>
-        <button class="answer" data-i="1"><span class="letter">B</span><span class="txt"></span><span class="pct"></span><span class="voters"></span></button>
-        <button class="answer" data-i="2"><span class="letter">C</span><span class="txt"></span><span class="pct"></span><span class="voters"></span></button>
-        <button class="answer" data-i="3"><span class="letter">D</span><span class="txt"></span><span class="pct"></span><span class="voters"></span></button>
+        <button class="answer" data-i="0"><span class="letter">A</span><span class="txt"></span><span class="pct"></span><span class="voters"></span><span class="tap"></span></button>
+        <button class="answer" data-i="1"><span class="letter">B</span><span class="txt"></span><span class="pct"></span><span class="voters"></span><span class="tap"></span></button>
+        <button class="answer" data-i="2"><span class="letter">C</span><span class="txt"></span><span class="pct"></span><span class="voters"></span><span class="tap"></span></button>
+        <button class="answer" data-i="3"><span class="letter">D</span><span class="txt"></span><span class="pct"></span><span class="voters"></span><span class="tap"></span></button>
       </div>
       <div class="qa-foot">
         <div class="status" id="status-line"></div>

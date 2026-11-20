@@ -106,7 +106,31 @@ export const HAT_UNLOCKS = {
   corona: { text: 'Gana el millón', test: p => p.stats.wins > 0 },
 };
 
+// Frases rápidas: salen como globo sobre tu avatar (se envía solo el índice).
+export const QUICK_PHRASES = [
+  '¡Es la A!', '¡Es la B!', '¡Es la C!', '¡Es la D!', 'Ni idea 😅', 'Confía en mí 😎',
+  '¡Usemos un comodín!', 'Mejor plantarnos 🏳️', '¡Rápido, confirma! ⏰', '¡Bien jugado! 👏', 'Uy, casi 😬', '¡Vamos por el millón! 💰',
+];
+
 export const REACTIONS = ['👏', '😂', '😱', '🤔', '🔥', '😭', '🙏', '💯'];
+
+// Nombres de equipo automáticos: «Los Ajolotes Atómicos», «Las Llamas Listas»…
+const TEAM_ANIMALS = [
+  ['Búhos', 'm'], ['Llamas', 'f'], ['Tucanes', 'm'], ['Jaguares', 'm'], ['Pulpos', 'm'], ['Capibaras', 'f'], ['Ajolotes', 'm'],
+  ['Iguanas', 'f'], ['Panteras', 'f'], ['Ardillas', 'f'], ['Coyotes', 'm'], ['Zorros', 'm'], ['Delfines', 'm'], ['Colibríes', 'm'],
+  ['Tortugas', 'f'], ['Abejas', 'f'], ['Tlacuaches', 'm'], ['Quetzales', 'm'], ['Mapaches', 'm'], ['Nutrias', 'f'], ['Gallinas', 'f'],
+];
+const TEAM_ADJ = [
+  ['Sabios', 'Sabias'], ['Listos', 'Listas'], ['Veloces', 'Veloces'], ['Geniales', 'Geniales'], ['Atómicos', 'Atómicas'],
+  ['Cósmicos', 'Cósmicas'], ['Galácticos', 'Galácticas'], ['Ingeniosos', 'Ingeniosas'], ['Imparables', 'Imparables'],
+  ['Brillantes', 'Brillantes'], ['Legendarios', 'Legendarias'], ['Millonarios', 'Millonarias'], ['Curiosos', 'Curiosas'],
+  ['Valientes', 'Valientes'], ['Eléctricos', 'Eléctricas'], ['Turbo', 'Turbo'], ['Furiosos', 'Furiosas'], ['Mágicos', 'Mágicas'],
+];
+export function randomTeamName() {
+  const [animal, g] = TEAM_ANIMALS[Math.floor(Math.random() * TEAM_ANIMALS.length)];
+  const adj = TEAM_ADJ[Math.floor(Math.random() * TEAM_ADJ.length)];
+  return `${g === 'm' ? 'Los' : 'Las'} ${animal} ${g === 'm' ? adj[0] : adj[1]}`;
+}
 
 export function fmtMoney(n) {
   return '$' + Number(n || 0).toLocaleString('es-MX');

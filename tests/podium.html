@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prueba de podios</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700;800&family=Nunito:wght@500;700;800;900&display=swap" rel="stylesheet">
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 13px system-ui, sans-serif; background: #120e22; color: #eee; display: grid; grid-template-rows: auto 1fr; }
+  #bar { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 6px 8px; background: #120e22; align-items: center; }
+  #bar .grp { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  #bar b { color: #ffd23f; }
+  button, select, input { background: #2c2450; color: #fff; border: 1px solid #4b3f86; border-radius: 6px; padding: 4px 8px; font: inherit; }
+  button { cursor: pointer; }
+  button.on { background: #ffd23f; color: #222; }
+  #stage { position: relative; min-height: 0; }
+  #err { position: absolute; left: 8px; bottom: 8px; color: #ff8080; white-space: pre-wrap; font-size: 12px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <div class="grp"><b>Jugadores</b>
+    <button id="add">+ Añadir</button><button id="rmLast">− Quitar último</button><button id="rmFirst">− Quitar primero</button>
+    <button id="avatar">Cambiar avatar</button><button id="rename">Renombrar</button>
+  </div>
+  <div class="grp"><b>Estado</b>
+    <select id="who"></select>
+    <button data-st="idle">idle</button><button data-st="voted">voted</button><button data-st="confirmed">confirmed</button>
+    <button data-st="correct">correct</button><button data-st="wrong">wrong</button><button data-st="waiting">waiting</button>
+    <button id="allIdle">todos idle</button><button id="sign">cartel</button>
+  </div>
+  <div class="grp"><b>Charla</b>
+    <input id="msg" value="¡Vamos equipo, esta la sabemos seguro!" size="26">
+    <button id="say">say</button><button id="focus">focus</button><button id="unfocus">focus(null)</button>
+  </div>
+  <div class="grp"><b>Podio</b><button id="show">showPodium</button><button id="clear">clearPodium</button></div>
+  <div class="grp" id="shots"><b>Plano</b></div>
+  <div class="grp" id="themes"><b>Estilo</b></div>
+  <div class="grp" id="modes"><b>Modo</b></div>
+</div>
+<div id="stage"><div id="err"></div></div>
+<script type="module">
+import { Stage } from '/js/scene.js';
+
+const errBox = document.getElementById('err');
+window.__errors = [];
+const logErr = (m) => { window.__errors.push(String(m)); errBox.textContent = window.__errors.slice(-6).join('\n'); };
+window.addEventListener('error', e => { if (!/ResizeObserver loop/.test(e.message)) logErr(e.message); });
+window.addEventListener('unhandledrejection', e => logErr(e.reason));
+const oe = console.error.bind(console);
+console.error = (...a) => { logErr(a.join(' ')); oe(...a); };
+
+const stage = new Stage(document.getElementById('stage'), { quality: 'alta' });
+window.stage = stage;
+stage.setMode('lobby');
+stage.setScreen({ top: 'Prueba', big: 'PODIOS', bottom: 'El Gran Millón' });
+
+const NAMES = ['Ana', 'Beto', 'Caro', 'Dani', 'Eva', 'Fito', 'Gaby', 'Hugo'];
+const HEX = ['#ff4d6d', '#ff8a3d', '#ffd23f', '#7bd389', '#2ec4b6', '#3a86ff', '#8b5cf6', '#f15bb5', '#b5651d', '#f1f1f1', '#454545', '#00c2ff'];
+let seq = 0;
+let players = [];
+const r = n => Math.floor(Math.random() * n);
+const mk = () => { const i = seq++; return { id: 'p' + i, name: NAMES[i % NAMES.length], av: { color: (i * 5) % 12, eyes: i % 6, mouth: (i * 2 + 1) % 6, hat: (i * 3 + 1) % 8 } }; };
+const sync = () => {
+  stage.setPlayers(players);
+  const who = document.getElementById('who'), cur = who.value;
+  who.innerHTML = '<option value="*">todos</option>' + players.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+  who.value = players.some(p => p.id === cur) ? cur : (players[0]?.id || '*');
+};
+const sel = () => document.getElementById('who').value;
+const pick = () => { const id = sel(); return id === '*' ? players[0] : players.find(p => p.id === id); };
+window.__test = { get players() { return players; }, set players(v) { players = v; sync(); }, mk, sync };
+
+for (let i = 0; i < 3; i++) players.push(mk());
+sync();
+
+document.getElementById('add').onclick = () => { if (players.length < 4) { players.push(mk()); sync(); } };
+document.getElementById('rmLast').onclick = () => { players.pop(); sync(); };
+document.getElementById('rmFirst').onclick = () => { players.shift(); sync(); };
+document.getElementById('avatar').onclick = () => { const p = pick(); if (p) { p.av = { color: r(12), eyes: r(6), mouth: r(6), hat: r(8) }; players = players.slice(); sync(); } };
+document.getElementById('rename').onclick = () => { const p = pick(); if (p) { p.name = NAMES[r(NAMES.length)] + r(99); sync(); } };
+document.querySelectorAll('[data-st]').forEach(b => b.onclick = () => stage.setPodiumState(sel(), b.dataset.st));
+document.getElementById('allIdle').onclick = () => stage.setPodiumState('*', 'idle');
+document.getElementById('sign').onclick = () => { const p = pick(); if (!p) return; const on = !p._sign; p._sign = on; stage.setSign(p.id, on ? 'B' : null, HEX[p.av.color]); };
+document.getElementById('say').onclick = () => { const p = pick(); if (p) stage.say(p.id, document.getElementById('msg').value, HEX[p.av.color]); };
+document.getElementById('focus').onclick = () => { const p = pick(); if (p) stage.focus(p.id); };
+document.getElementById('unfocus').onclick = () => stage.focus(null);
+document.getElementById('show').onclick = () => {
+  const ids = players.map(p => p.id).sort(() => Math.random() - 0.5);
+  stage.showPodium(ids); stage.cameraShot('podium'); stage.confetti(1);
+};
+document.getElementById('clear').onclick = () => stage.clearPodium();
+
+const group = (id, list, fn, initial) => {
+  const g = document.getElementById(id);
+  list.forEach(v => {
+    const b = document.createElement('button');
+    b.textContent = v;
+    b.onclick = () => { g.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); fn(v); };
+    if (v === initial) b.classList.add('on');
+    g.appendChild(b);
+  });
+};
+group('shots', ['wide', 'lock', 'reveal', 'over', 'tower', 'podium'], v => stage.cameraShot(v), 'wide');
+group('themes', ['gala', 'juguete', 'synth', 'torre'], v => stage.setTheme(v), 'gala');
+group('modes', ['home', 'lobby', 'game'], v => stage.setMode(v), 'lobby');
+</script>
+</body>
+</html>

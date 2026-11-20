@@ -14,7 +14,7 @@ export function newCode() {
 }
 export const cleanCode = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
 
-const EVENTS = ['hello', 'state', 'custom', 'act', 'chat', 'react', 'kick'];
+const EVENTS = ['hello', 'state', 'custom', 'act', 'chat', 'react', 'kick', 'say'];
 
 export class Room {
   constructor(code, me, { onMembers, onMessage, onStatus }) {

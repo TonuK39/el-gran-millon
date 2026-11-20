@@ -1,7 +1,7 @@
 // El Gran Millón · interfaz y flujo de la aplicación.
 import {
-  CATEGORIES, CAT_BY_ID, ROLES, BASE_ROLES, THEMES, AVATAR, HAT_UNLOCKS, REACTIONS, MAX_PLAYERS,
-  TIME_OPTIONS, DIFFICULTIES, SAFE_MODES, LADDERS, safeLevels, fmtMoney,
+  CATEGORIES, CAT_BY_ID, ROLES, BASE_ROLES, THEMES, AVATAR, HAT_UNLOCKS, REACTIONS, QUICK_PHRASES, MAX_PLAYERS,
+  TIME_OPTIONS, DIFFICULTIES, SAFE_MODES, LADDERS, safeLevels, fmtMoney, randomTeamName,
 } from './config.js';
 import { profile, saveProfile, isThemeUnlocked, isRoleUnlocked, isHatUnlocked, recordGame, getSeen, addSeen, myId } from './storage.js';
 import { Bank, parseCustom, CUSTOM_MAX } from './questions.js';
@@ -18,6 +18,8 @@ const LETTERS = ['A', 'B', 'C', 'D'];
 const FUN_NAMES = ['Búho Sabio', 'Llama Lista', 'Tucán Veloz', 'Gato Genio', 'Zorro Astuto', 'Panda Pro', 'Coyote Cool', 'Jaguar Joven', 'Delfín Feliz', 'Colibrí Rápido', 'Pulpo Listo', 'Erizo Épico', 'Quetzal Crack', 'Capibara Zen'];
 const colorOf = av => AVATAR.colors[(av && av.color) % AVATAR.colors.length] || '#ffffff';
 
+// El nombre es obligatorio y nunca se pone solo: borra los que versiones anteriores asignaban al azar.
+if (!profile.nameOk && FUN_NAMES.includes(profile.name)) { profile.name = ''; saveProfile(); }
 const me = { id: myId(), name: profile.name, av: { ...profile.avatar } };
 const bank = new Bank();
 const lobbyAd = new LobbyAd();
@@ -28,7 +30,8 @@ const S = {
   screen: 'home', room: null, engine: null, state: null, custom: { text: '', list: [] },
   lastEv: 0, recorded: null, overShown: null, seenSentTo: null, hostMissingSince: 0,
   deadline: 0, total: 0, finalAt: 0, lastTick: -1, lastFinal: -1, previewAnim: 'idle', previewUntil: 0,
-  lastChat: 0, lastReact: 0, chatOpen: false, unlocks: [],
+  lastChat: 0, lastReact: 0, lastSay: 0, chatOpen: false, unlocks: [],
+  waitKey: '', waitSince: 0, waitShown: false, waitIds: [],
 };
 
 // ====================================================================
@@ -75,7 +78,7 @@ function thumb(av, size = 96) {
   thumbCache.set(key, url);
   return url;
 }
-const imgThumb = (av, title = '', size = 96) => `<img src="${thumb(av, size)}" alt="" title="${esc(title)}" style="border-color:${colorOf(av)}">`;
+const imgThumb = (av, title = '', size = 96, cls = '') => `<img src="${thumb(av, size)}" alt="" title="${esc(title)}" class="${cls}" style="border-color:${colorOf(av)}">`;
 
 function show(screen) {
   S.screen = screen;
@@ -84,13 +87,21 @@ function show(screen) {
 }
 
 function ensureName() {
-  let n = ($('#name-input').value || profile.name || '').trim().slice(0, 16);
-  if (!n) n = FUN_NAMES[Math.floor(Math.random() * FUN_NAMES.length)];
-  profile.name = n;
-  $('#name-input').value = n;
+  const input = $('#name-input');
+  const n = (input.value || '').trim().slice(0, 16);
+  if (n.length < 2) {
+    if (S.screen !== 'home') goHome();
+    input.classList.remove('need'); void input.offsetWidth; input.classList.add('need');
+    $('#name-error').classList.remove('hidden');
+    input.focus();
+    audio.sfx('wrong');
+    return false;
+  }
+  profile.name = n; profile.nameOk = true;
   saveProfile();
   me.name = n;
   me.av = { ...profile.avatar };
+  return true;
 }
 
 function inviteUrl(code) { return `${location.origin}${location.pathname}?sala=${code}`; }
@@ -99,10 +110,10 @@ function inviteUrl(code) { return `${location.origin}${location.pathname}?sala=$
 // inicio
 // ====================================================================
 const AM_ROWS = [
-  { key: 'color', label: 'Color', names: AVATAR.colorNames },
-  { key: 'eyes', label: 'Ojos', names: AVATAR.eyeNames },
-  { key: 'mouth', label: 'Boca', names: AVATAR.mouthNames },
-  { key: 'hat', label: 'Sombrero', names: AVATAR.hatNames },
+  { key: 'color', label: 'Color', icon: '🎨', names: AVATAR.colorNames },
+  { key: 'eyes', label: 'Ojos', icon: '👀', names: AVATAR.eyeNames },
+  { key: 'mouth', label: 'Boca', icon: '👄', names: AVATAR.mouthNames },
+  { key: 'hat', label: 'Sombrero', icon: '🎩', names: AVATAR.hatNames },
 ];
 const npcs = Array.from({ length: 3 }, (_, i) => ({
   id: 'npc' + i, name: FUN_NAMES[(i * 5 + 3) % FUN_NAMES.length],
@@ -112,18 +123,21 @@ const npcs = Array.from({ length: 3 }, (_, i) => ({
 function initHome() {
   const input = $('#name-input');
   input.value = profile.name || '';
-  input.addEventListener('input', () => { profile.name = input.value.trim().slice(0, 16); saveProfile(); setHomePlayers(); });
-  const rows = $('#am-rows');
-  rows.innerHTML = AM_ROWS.map(r => `
-    <div class="am-row" data-key="${r.key}">
-      <button type="button" data-d="-1" aria-label="${r.label} anterior">◀</button>
-      <div class="am-label"><small>${r.label}</small><span></span></div>
-      <button type="button" data-d="1" aria-label="${r.label} siguiente">▶</button>
-    </div>`).join('');
-  rows.addEventListener('click', e => {
-    const b = e.target.closest('button[data-d]');
+  input.addEventListener('input', () => {
+    profile.name = input.value.trim().slice(0, 16);
+    if (profile.name.length >= 2) { profile.nameOk = true; input.classList.remove('need'); $('#name-error').classList.add('hidden'); }
+    saveProfile(); setHomePlayers();
+  });
+  const side = d => AM_ROWS.map(r => {
+    const lbl = `${r.label} ${d < 0 ? 'anterior' : 'siguiente'}`;
+    return `<button type="button" data-key="${r.key}" data-d="${d}" title="${lbl}" aria-label="${lbl}">${d < 0 ? '<b>◀</b>' : ''}<i>${r.icon}</i>${d > 0 ? '<b>▶</b>' : ''}</button>`;
+  }).join('');
+  $('#am-left').innerHTML = side(-1);
+  $('#am-right').innerHTML = side(1);
+  $('.avatar-maker').addEventListener('click', e => {
+    const b = e.target.closest('button[data-key]');
     if (!b) return;
-    const key = b.closest('.am-row').dataset.key;
+    const key = b.dataset.key;
     const row = AM_ROWS.find(r => r.key === key);
     const n = row.names.length;
     let v = profile.avatar[key];
@@ -134,7 +148,7 @@ function initHome() {
     profile.avatar[key] = v;
     saveProfile();
     audio.sfx('click');
-    syncAvatarLabels();
+    syncAvatarLabels(key);
     setHomePlayers();
     S.previewAnim = 'happy'; S.previewUntil = performance.now() + 900;
   });
@@ -177,11 +191,9 @@ function initHome() {
   requestAnimationFrame(loop);
 }
 
-function syncAvatarLabels() {
-  for (const r of AM_ROWS) {
-    const v = profile.avatar[r.key] % r.names.length;
-    $(`.am-row[data-key="${r.key}"] .am-label span`).textContent = r.names[v];
-  }
+function syncAvatarLabels(key) {
+  const row = AM_ROWS.find(r => r.key === key);
+  $('#am-caption').textContent = row ? `${row.icon} ${row.label}: ${row.names[profile.avatar[key] % row.names.length]}` : 'Usa las flechas para personalizar';
 }
 
 function setHomePlayers() {
@@ -221,7 +233,7 @@ function goHome() {
 // salas
 // ====================================================================
 async function quickPlay() {
-  ensureName();
+  if (!ensureName()) return;
   audio.unlock();
   setLoader('Buscando una sala abierta…', true);
   let rooms = [];
@@ -237,9 +249,9 @@ async function quickPlay() {
 }
 
 async function enterRoom(code, intent, opts = {}) {
+  if (!ensureName()) return false;
   if (S.room) await leaveRoom(true);
   audio.unlock();
-  ensureName();
   setLoader(intent === 'create' ? 'Preparando el estudio…' : 'Entrando a la sala…', true);
   const room = new Room(code, me, {
     onMembers: list => onMembers(room, list),
@@ -262,7 +274,7 @@ async function enterRoom(code, intent, opts = {}) {
   if (S.room !== room) return false;
   if (intent === 'create') {
     const theme = isThemeUnlocked(profile.theme) ? profile.theme : 'gala';
-    becomeHost(newRoomState(me.id, { ...defaultSettings(), pub: !!opts.pub, theme }));
+    becomeHost(newRoomState(me.id, { ...defaultSettings(), pub: !!opts.pub, theme, team: randomTeamName() }));
   } else {
     const ok = await waitForState(room, 5500);
     if (!ok) {
@@ -382,6 +394,13 @@ function onMessage(room, ev, p, from) {
     case 'react':
       if (REACTIONS.includes(p.e) && stage) { stage.react(from, p.e); audio.sfx('react'); }
       break;
+    case 'say': {
+      const text = QUICK_PHRASES[p.k | 0];
+      const who = S.state && S.state.players.find(x => x.id === from);
+      if (!text || !who) break;
+      showSay(who, text);
+      break;
+    }
     case 'kick':
       if (p.id === me.id) {
         leaveRoom(false);
@@ -492,7 +511,9 @@ function showLobby() {
   show('lobby');
   $('#chat-slot-lobby').appendChild($('#chat'));
   $('#over').classList.add('hidden');
-  if (stage) { stage.setMode('lobby'); stage.setAllAnim('idle'); stage.setMood('idle'); stage.setScreen({ top: 'Sala ' + S.room.code, big: 'EL GRAN MILLÓN', bottom: 'Esperando al equipo…' }); }
+  document.body.dataset.phase = '';
+  $('.lobby-settings').classList.remove('open');
+  if (stage) { stage.clearPodium?.(); stage.setMode('lobby'); stage.setAllAnim('idle'); stage.setMood('idle'); stage.setScreen({ top: 'Sala ' + S.room.code, big: 'EL GRAN MILLÓN', bottom: 'Esperando al equipo…' }); }
   audio.setMusic('lobby');
   S.settingsBuilt = null;
   updateFraming();
@@ -504,18 +525,17 @@ function renderLobby(st) {
   $('#room-code').textContent = S.room.code;
   $('#lobby-count').textContent = `${online.length}/${MAX_PLAYERS}`;
   $('#room-vis').textContent = st.settings.pub ? '🌎 Pública' : '🔒 Privada';
-  $('#host-note').textContent = isHost ? '👑 Eres el anfitrión' : 'Solo el anfitrión cambia los ajustes';
-  // Jugadores
+  $('#host-note').textContent = isHost ? '👑 Tú eliges los ajustes' : 'El anfitrión elige los ajustes';
   const slots = [];
   for (let i = 0; i < MAX_PLAYERS; i++) {
     const p = online[i];
-    if (!p) { slots.push(`<li class="player empty"><span class="thumb">➕</span><span class="muted">Invita a alguien…</span></li>`); continue; }
+    if (!p) { slots.push(`<li class="player empty"><span class="thumb">➕</span><span class="p-info"><span class="p-name">Lugar libre</span></span></li>`); continue; }
     const R = p.role ? ROLES[p.role] : null;
     slots.push(`<li class="player ${p.id === me.id ? 'me' : ''}">
       ${imgThumb(p.av, p.name)}
-      <div><div class="p-name">${esc(p.name)} ${p.id === st.hostId ? '<span class="crown" title="Anfitrión">👑</span>' : ''} ${p.id === me.id ? '<span class="pill pill-soft">tú</span>' : ''}</div>
-      <div class="p-role">${R ? `${R.icon} ${R.name}` : 'Sin rol todavía'}</div></div>
-      ${isHost && p.id !== me.id ? `<button class="kick" data-kick="${esc(p.id)}" title="Sacar de la sala" aria-label="Sacar a ${esc(p.name)}">✖</button>` : '<span></span>'}
+      <div class="p-info"><div class="p-name">${esc(p.name)}${p.id === st.hostId ? ' <span class="crown" title="Anfitrión">👑</span>' : ''}</div>
+      <div class="p-role">${R ? `${R.icon} ${R.power}` : 'Eligiendo rol…'}</div></div>
+      ${isHost && p.id !== me.id ? `<button class="kick" data-kick="${esc(p.id)}" title="Sacar de la sala" aria-label="Sacar a ${esc(p.name)}">✖</button>` : ''}
     </li>`);
   }
   $('#lobby-list').innerHTML = slots.join('');
@@ -527,69 +547,64 @@ function renderLobby(st) {
   if (stage) stage.setScreen({ top: 'Sala ' + S.room.code, big: 'EL GRAN MILLÓN', bottom: `${online.length} de ${MAX_PLAYERS} jugadores` });
 }
 
+function settingsSummary(s) {
+  const t = THEMES[s.theme] || THEMES.gala;
+  const cats = s.cats.length === CATEGORIES.length ? 'Todos los temas' : `${s.cats.length} temas`;
+  return `${s.mode === 'comp' ? '⚔️ Competitivo' : '🤝 Cooperativo'} · ${s.len} preguntas · ${s.time ? s.time + ' s' : 'sin límite'} · ${(DIFFICULTIES.find(d => d.id === s.diff) || {}).name} · ${cats} · ${t.icon}`;
+}
+
 function renderSettings(st, isHost) {
   const form = $('#settings-form');
   const key = isHost ? 'host' : 'guest';
   if (S.settingsBuilt !== key) {
     S.settingsBuilt = key;
-    const seg = (k, opts) => `<div class="seg" data-key="${k}">${opts.map(([v, l]) => `<button type="button" data-v="${v}">${l}</button>`).join('')}</div>`;
+    const seg = (k, opts) => `<div class="seg" data-key="${k}">${opts.map(([v, l, tip]) => `<button type="button" data-v="${v}" ${tip ? `title="${esc(tip)}"` : ''}>${l}</button>`).join('')}</div>`;
     form.innerHTML = `
-      <div class="field"><label for="f-team">Nombre del equipo</label><input id="f-team" class="input" maxlength="28" placeholder="Los Cerebritos" autocomplete="off"></div>
-      <div class="field">
-        <div class="f-row"><span class="f-label">Temas</span><div class="chip-tools"><button type="button" data-cats="all">Todos</button><button type="button" data-cats="none">Ninguno</button></div></div>
-        <div class="chips" id="f-cats">${CATEGORIES.map(c => `<button type="button" class="chip" data-cat="${c.id}">${c.icon} ${c.name}</button>`).join('')}</div>
-      </div>
-      <div class="field"><span class="f-label">Modo de juego</span>${seg('mode', [['coop', '🤝 Cooperativo'], ['comp', '⚔️ Competitivo']])}<small class="muted" id="f-mode-info"></small></div>
-      <div class="field"><span class="f-label">Escalera</span>${seg('len', [[10, '10 preguntas'], [15, '15 preguntas'], [20, '20 preguntas']])}</div>
-      <div class="field"><span class="f-label">Tiempo por pregunta</span>${seg('time', TIME_OPTIONS.map(t => [t, t ? `${t} s` : 'Sin límite']))}</div>
+      <div class="field wide"><label for="f-team">Equipo</label>
+        <div class="f-row"><input id="f-team" class="input" maxlength="28" autocomplete="off">${isHost ? '<button type="button" class="icon-btn" id="f-team-dice" title="Otro nombre al azar" aria-label="Otro nombre al azar">🎲</button>' : ''}</div></div>
+      <div class="field wide"><span class="f-label">Modo</span>${seg('mode', [['coop', '🤝 Cooperativo', 'Votan juntos y suben la escalera en equipo'], ['comp', '⚔️ Competitivo', 'Cada quien responde por su lado y gana quien junte más']])}<small class="muted f-info" id="f-mode-info"></small></div>
+      <div class="field"><span class="f-label">Preguntas</span>${seg('len', [[10, '10'], [15, '15'], [20, '20']])}</div>
+      <div class="field"><span class="f-label">Tiempo</span>${seg('time', TIME_OPTIONS.map(t => [t, t ? `${t}s` : '∞', t ? `${t} segundos por pregunta` : 'Sin límite de tiempo']))}</div>
       <div class="field"><span class="f-label">Dificultad</span>${seg('diff', DIFFICULTIES.map(d => [d.id, d.name]))}</div>
-      <div class="field" id="f-safe-field"><span class="f-label">Puntos seguros</span>${seg('safe', SAFE_MODES.map(d => [d.id, d.name]))}</div>
-      <div class="field"><span class="f-label">Estilo visual</span><div class="themes" id="f-themes"></div></div>
-      <div class="field"><span class="f-label">Sala</span>${seg('pub', [['false', '🔒 Privada'], ['true', '🌎 Pública']])}</div>
-      <div class="field"><span class="f-label">Preguntas personalizadas</span>
-        <div class="f-row" style="flex-wrap:wrap">${seg('customMode', [['off', 'No usar'], ['mix', 'Mezclar'], ['only', 'Solo las mías']])}
-        ${isHost ? '<button type="button" class="btn btn-small custom-btn" id="f-custom">✏️ Escribir</button>' : ''}</div>
-        <small class="muted" id="f-custom-info"></small>
-      </div>`;
+      <div class="field" id="f-safe-field"><span class="f-label">Puntos seguros</span>${seg('safe', [['clasico', '2 🛡️', 'Dos puntos seguros'], ['uno', '1 🛡️', 'Un punto seguro'], ['ninguno', 'Ninguno', 'Todo o nada']])}</div>
+      <div class="field"><span class="f-label">Temas</span><button type="button" class="btn btn-small pick-btn" id="f-cats-btn"></button></div>
+      <div class="field"><span class="f-label">Estilo</span><div class="theme-dots" id="f-themes"></div></div>
+      <div class="field"><span class="f-label">Sala</span>${seg('pub', [['false', '🔒 Privada', 'Solo entra quien tenga el link'], ['true', '🌎 Pública', 'Cualquiera puede entrar con «¡Jugar!»']])}</div>
+      <div class="field"><span class="f-label">Preguntas propias</span><button type="button" class="btn btn-small pick-btn" id="f-custom"></button></div>`;
   }
   const s = st.settings;
+  $('#settings-summary').textContent = settingsSummary(s) + '  ▾';
   for (const segEl of $$('.seg', form)) {
     const k = segEl.dataset.key;
     for (const b of $$('button', segEl)) {
       b.classList.toggle('on', String(s[k]) === b.dataset.v);
-      b.disabled = !isHost || (k === 'customMode' && b.dataset.v !== 'off' && !s.customCount);
+      b.disabled = !isHost;
     }
   }
-  for (const c of $$('#f-cats .chip', form)) {
-    c.classList.toggle('on', s.cats.includes(c.dataset.cat));
-    c.disabled = !isHost;
-    if (bank.loaded && !c.querySelector('small')) c.insertAdjacentHTML('beforeend', ` <small>${bank.countFor([c.dataset.cat])}</small>`);
-  }
-  for (const b of $$('.chip-tools button', form)) b.classList.toggle('hidden', !isHost);
   const comp = s.mode === 'comp';
   $('#f-safe-field').classList.toggle('hidden', comp);
   $('#f-mode-info').textContent = comp
-    ? 'Cada quien responde por su lado y nadie queda fuera: cada acierto paga el valor de su escalón y gana quien junte más. Todos tienen los 6 comodines, una vez cada uno. Si hay empate, muerte súbita. Mínimo 2 jugadores.'
-    : 'Todo el equipo vota la misma respuesta y suben juntos la escalera.';
+    ? 'Cada quien responde por su lado: cada acierto paga su escalón y gana quien junte más. Empate: muerte súbita. Mínimo 2.'
+    : 'Votan juntos la misma respuesta y suben la escalera en equipo.';
   const team = $('#f-team');
   if (document.activeElement !== team) team.value = s.team;
   team.disabled = !isHost;
-  const themes = $('#f-themes');
-  themes.innerHTML = Object.entries(THEMES).map(([id, t]) => {
+  const nCats = s.cats.length;
+  $('#f-cats-btn').textContent = nCats === CATEGORIES.length ? '🗂️ Todos (12)' : nCats ? `🗂️ ${nCats} de ${CATEGORIES.length}` : '⚠️ Ninguno';
+  $('#f-custom').textContent = s.customCount ? `✏️ ${s.customCount} · ${{ off: 'sin usar', mix: 'mezcladas', only: 'solo propias' }[s.customMode]}` : (isHost ? '✏️ Escribir' : '✏️ Ninguna');
+  $('#f-custom').disabled = !isHost;
+  $('#f-themes').innerHTML = Object.entries(THEMES).map(([id, t]) => {
     const locked = isHost ? !isThemeUnlocked(id) : false;
     const on = s.theme === id;
-    if (!isHost && !on) return '';
-    return `<button type="button" class="theme-card ${on ? 'on' : ''} ${locked ? 'locked' : ''}" data-theme="${id}" ${!isHost || locked ? 'disabled' : ''} title="${esc(locked ? 'Para desbloquear: ' + t.unlock.text : t.desc)}">
-      <span class="ti">${t.icon}</span><b>${t.name}</b><small>${esc(locked ? '🔒 ' + t.unlock.text : t.desc)}</small></button>`;
-  }).join('') + (isHost ? '' : '<small class="muted" style="align-self:center">El estilo lo elige el anfitrión entre los que tiene desbloqueados.</small>');
-  $('#f-custom-info').textContent = s.customCount
-    ? `${s.customCount} pregunta(s) personalizada(s) cargada(s). Las partidas con preguntas personalizadas no entran al Salón de la fama.`
-    : (isHost ? 'Agrega tus propias preguntas (por ejemplo sobre tu grupo de amigos).' : 'El anfitrión no agregó preguntas propias.');
+    const tip = locked ? `${t.name} · 🔒 ${t.unlock.text}` : `${t.name}: ${t.desc}`;
+    return `<button type="button" class="theme-dot ${on ? 'on' : ''} ${locked ? 'locked' : ''}" data-theme="${id}" ${!isHost || locked ? 'disabled' : ''} title="${esc(tip)}" aria-label="${esc(tip)}">${t.icon}</button>`;
+  }).join('');
 }
 
 const amHost = () => !!(S.state && S.state.hostId === me.id);
 function bindSettings(form) {
   form.addEventListener('click', e => {
+    if (e.target.closest('#f-cats-btn')) { openCatsModal(); return; }
     if (!amHost()) return;
     const segBtn = e.target.closest('.seg button');
     if (segBtn && !segBtn.disabled) {
@@ -601,17 +616,8 @@ function bindSettings(form) {
       audio.sfx('click');
       return;
     }
-    const chip = e.target.closest('#f-cats .chip');
-    if (chip && S.state) {
-      const cats = new Set(S.state.settings.cats);
-      cats.has(chip.dataset.cat) ? cats.delete(chip.dataset.cat) : cats.add(chip.dataset.cat);
-      act({ t: 'settings', patch: { cats: [...cats] } });
-      audio.sfx('click');
-      return;
-    }
-    const tool = e.target.closest('[data-cats]');
-    if (tool) { act({ t: 'settings', patch: { cats: tool.dataset.cats === 'all' ? CATEGORIES.map(c => c.id) : [] } }); return; }
-    const th = e.target.closest('.theme-card');
+    if (e.target.closest('#f-team-dice')) { act({ t: 'settings', patch: { team: randomTeamName() } }); audio.sfx('react'); return; }
+    const th = e.target.closest('.theme-dot');
     if (th && !th.disabled) { act({ t: 'settings', patch: { theme: th.dataset.theme } }); profile.theme = th.dataset.theme; saveProfile(); audio.sfx('whoosh'); return; }
     if (e.target.closest('#f-custom')) openCustomModal();
   });
@@ -621,21 +627,56 @@ function bindSettings(form) {
     clearTimeout(tmr);
     tmr = setTimeout(() => act({ t: 'settings', patch: { team: e.target.value.trim() } }), 350);
   });
+  $('#settings-summary').addEventListener('click', () => {
+    const box = $('.lobby-settings');
+    box.classList.toggle('open');
+    $('#settings-summary').setAttribute('aria-expanded', String(box.classList.contains('open')));
+  });
+}
+
+function openCatsModal() {
+  const host = amHost();
+  const cur = new Set(S.state ? S.state.settings.cats : []);
+  const paint = box => $$('.chip', box).forEach(c => c.classList.toggle('on', cur.has(c.dataset.cat)));
+  openModal(`<h2>🗂️ Temas de las preguntas</h2>
+    ${host ? '<div class="chip-tools"><button type="button" data-all="1">Todos</button><button type="button" data-all="0">Ninguno</button></div>' : '<p class="muted">El anfitrión elige los temas.</p>'}
+    <div class="chips cats-grid">${CATEGORIES.map(c => `<button type="button" class="chip" data-cat="${c.id}" ${host ? '' : 'disabled'}>${c.icon} ${c.name}${bank.loaded ? ` <small>${bank.countFor([c.id])}</small>` : ''}</button>`).join('')}</div>
+    <div class="over-actions"><button class="btn btn-go" id="cats-ok">Listo</button></div>`, box => {
+    paint(box);
+    box.addEventListener('click', e => {
+      if (e.target.closest('#cats-ok')) { closeModal(); return; }
+      if (!host) return;
+      const all = e.target.closest('[data-all]');
+      const chip = e.target.closest('.chip');
+      if (all) { cur.clear(); if (all.dataset.all === '1') CATEGORIES.forEach(c => cur.add(c.id)); }
+      else if (chip) { if (cur.has(chip.dataset.cat)) cur.delete(chip.dataset.cat); else cur.add(chip.dataset.cat); }
+      else return;
+      paint(box);
+      audio.sfx('click');
+      act({ t: 'settings', patch: { cats: CATEGORIES.map(c => c.id).filter(id => cur.has(id)) } });
+    });
+  });
 }
 
 function renderRoles(st) {
-  const myRole = (st.players.find(p => p.id === me.id) || {}).role;
-  const ids = Object.keys(ROLES).filter(id => BASE_ROLES.includes(id) || isRoleUnlocked(id) || st.players.some(p => p.role === id));
+  const meP = st.players.find(p => p.id === me.id) || {};
+  const myRole = meP.role;
+  const ids = Object.keys(ROLES).filter(id => BASE_ROLES.includes(id) || isRoleUnlocked(id) || st.players.some(p => p.role === id && p.online));
   $('#role-picker').innerHTML = ids.map(id => {
     const R = ROLES[id];
     const owner = st.players.find(p => p.role === id && p.online);
     const mine = owner && owner.id === me.id;
     const taken = owner && !mine;
-    return `<button type="button" class="role ${mine ? 'mine' : ''} ${taken ? 'taken' : ''}" data-role="${id}" ${taken ? 'disabled' : ''} title="${esc(R.desc)}">
-      <span class="ri">${R.icon}</span><b>${R.name}</b><span class="rp">${R.power}</span><span class="rd">${esc(R.desc)}</span>
-      ${owner ? `<img class="owner" src="${thumb(owner.av, 64)}" alt="${esc(owner.name)}" title="${esc(owner.name)}">` : ''}
+    const tip = `${R.name} · ${R.power}: ${R.desc}${taken ? ` (lo eligió ${owner.name})` : ''}`;
+    return `<button type="button" class="role ${mine ? 'mine' : ''} ${taken ? 'taken' : ''}" data-role="${id}" ${taken ? 'disabled' : ''} title="${esc(tip)}" aria-label="${esc(tip)}">
+      <span class="ri">${R.icon}</span><b>${R.power}</b><small>${R.name}</small>
+      ${owner ? `<img class="owner" src="${thumb(owner.av, 64)}" alt="">` : ''}
     </button>`;
-  }).join('') + `<p class="muted small" style="grid-column:1/-1;margin:2px 0 0">${myRole ? `Tu rol: ${ROLES[myRole].icon} ${ROLES[myRole].name}. ` : ''}${st.settings.mode === 'comp' ? '⚔️ En competitivo cada jugador tiene los 6 comodines (una vez cada uno); el rol solo es tu personaje.' : 'Si son menos de 4, los comodines sin dueño se reparten entre el equipo.'}</p>`;
+  }).join('');
+  const R = myRole && ROLES[myRole];
+  $('#role-hint').innerHTML = R
+    ? `${R.icon} <b>${esc(R.name)}</b>: ${esc(R.desc)} Solo tú puedes usarlo, una vez.`
+    : 'Elige un rol: su comodín será solo tuyo. Si no eliges, te toca uno al azar.';
 }
 
 // ====================================================================
@@ -680,7 +721,8 @@ function renderGame(st, prev) {
   const newGame = !pg || pg.id !== g.id;
   const qChanged = newGame || !pg.q || !g.q || pg.q.id !== g.q.id;
   const phaseChanged = !prev || prev.phase !== st.phase || newGame;
-  if (newGame) { $('#over').classList.add('hidden'); S.overShown = null; if (stage) stage.hideConfetti(); }
+  if (newGame) { $('#over').classList.add('hidden'); S.overShown = null; if (stage) { stage.hideConfetti(); stage.clearPodium?.(); } }
+  document.body.dataset.phase = st.phase;
 
   const shownLevel = Math.min(g.n, g.len - 1);
   if (g.comp && st.phase === 'over') $('#level-pill').innerHTML = '🏁 <b>Fin de la partida</b>' + (g.me ? ` · Tú <b>${fmtMoney(g.comp.score[me.id] || 0)}</b>` : '');
@@ -720,6 +762,10 @@ function onPhase(st, prev, qChanged) {
   } else if (ph === 'voting') {
     audio.setMusic('think', g.n / Math.max(1, g.len - 1));
     stage.cameraShot('wide'); stage.setMood('idle');
+    if (S.tipShown !== g.id && (g.n === 0 || !S.tipShown)) {
+      S.tipShown = g.id;
+      centerMsg('👆 Toca dos veces', 'Un toque elige la respuesta y el segundo la confirma', '', 3400);
+    }
   } else if (ph === 'locked') {
     audio.sfx('lock'); audio.setMusic('tension');
     stage.cameraShot('lock'); stage.setMood('tense');
@@ -756,7 +802,11 @@ function onPhase(st, prev, qChanged) {
     }
   } else if (ph === 'over') {
     const kind = g.outcome && g.outcome.kind;
-    stage.cameraShot('over');
+    const onlineIds = new Set(online.map(p => p.id));
+    const ps = g.ps || {};
+    const ranked = (g.comp && g.comp.rank ? g.comp.rank.map(r => r.id) : [...g.roster].sort((a, b) => ((ps[b.id] || {}).ok || 0) - ((ps[a.id] || {}).ok || 0)).map(r => r.id))
+      .filter(id => onlineIds.has(id));
+    if (stage.showPodium) { stage.showPodium(ranked); stage.cameraShot('podium'); } else stage.cameraShot('over');
     if (kind === 'comp') {
       const iWon = g.outcome.winner === me.id;
       audio.sfx(iWon ? 'win' : 'walk'); audio.setMusic(iWon ? 'win' : 'lobby');
@@ -770,7 +820,7 @@ function onPhase(st, prev, qChanged) {
       stage.setMood('idle'); stage.setAllAnim('wave');
       if (g.outcome.prize > 0) stage.confetti(0.6);
     } else {
-      audio.setMusic('lose'); stage.setMood('sad'); stage.setAllAnim('sad');
+      audio.setMusic('lose'); stage.setMood('sad');
     }
   }
 }
@@ -800,7 +850,7 @@ function renderLifelines(st) {
   const g = st.game;
   if (g.comp) {
     const P = g.me;
-    const html = Object.keys(ROLES).map(role => {
+    const html = Object.keys(P ? P.life : {}).filter(role => ROLES[role]).map(role => {
       const R = ROLES[role];
       const used = !P || P.life[role];
       let can = !!P && !used && st.phase === 'voting' && g.playing && !P.c;
@@ -808,7 +858,7 @@ function renderLifelines(st) {
       if (role === 'suertudo' && P && P.dbl) can = false;
       const active = role === 'suertudo' && P && P.dbl;
       return `<button class="life mine ${used ? 'used' : ''} ${active ? 'active' : ''}" data-role="${role}" ${can ? '' : 'disabled'} title="${esc(R.desc)}">
-        <span class="li">${R.icon}</span><span><b>${R.power}</b><small>${active ? '¡activo!' : used ? 'usado' : 'una vez'}</small></span><span></span></button>`;
+        <span class="li">${R.icon}</span><span><b>${R.power}</b><small>${active ? '¡activo!' : used ? 'usado' : 'Tu comodín'}</small></span><span></span></button>`;
     }).join('');
     const el = $('#lifelines');
     if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
@@ -820,11 +870,11 @@ function renderLifelines(st) {
     const owner = st.players.find(p => p.id === L.owner);
     const ownerOnline = owner && owner.online;
     const mine = L.owner === me.id;
-    let can = !L.used && st.phase === 'voting' && (mine || !ownerOnline);
+    let can = !L.used && st.phase === 'voting' && mine;
     if (role === 'crono' && !st.settings.time) can = false;
     if (role === 'suertudo' && g.dbl) can = false;
     const active = role === 'suertudo' && g.dbl;
-    const tip = `${R.desc}${mine ? '' : owner ? ` · Lo usa ${owner.name}${ownerOnline ? '' : ' (desconectado: cualquiera puede usarlo)'}` : ''}`;
+    const tip = `${R.desc}${mine ? ' · Solo tú puedes usarlo' : owner ? ` · Solo lo puede usar ${owner.name}${ownerOnline ? '' : ' (desconectado)'}` : ''}`;
     return `<button class="life ${L.used ? 'used' : ''} ${active ? 'active' : ''} ${mine ? 'mine' : 'notmine'}" data-role="${role}" ${can ? '' : 'disabled'} title="${esc(tip)}">
       <span class="li">${R.icon}</span><span><b>${R.power}</b><small>${esc(owner ? (mine ? 'Tu comodín' : owner.name) : '')}${active ? ' · ¡activo!' : ''}</small></span>
       ${owner ? `<img src="${thumb(owner.av, 64)}" alt="">` : '<span></span>'}
@@ -864,6 +914,10 @@ function renderQuestion(st, qChanged) {
     b.classList.toggle('wrong', (st.phase === 'reveal' && g.result === 'retry' && g.picked === i) || (revealed && g.picked === i && g.answer !== i));
     b.disabled = !isVoting || removed || (!!g.comp && (!g.playing || !!(g.me && g.me.c)));
     $('.pct', b).textContent = g.poll && !removed ? `${g.poll[i]}%` : '';
+    const tap = $('.tap', b);
+    const minePick = isVoting && !!myVote && myVote.o === i;
+    tap.textContent = minePick ? (myVote.c ? '🔒 Confirmada' : '👆 Toca otra vez para confirmar') : '';
+    tap.classList.toggle('ok', minePick && !!myVote.c);
     b.setAttribute('aria-label', `Respuesta ${LETTERS[i]}: ${q.opts[i]}`);
   });
   const extra = [];
@@ -875,7 +929,8 @@ function renderQuestion(st, qChanged) {
   $('#q-extra').textContent = extra.join(' ');
   const walk = $('#btn-walk');
   const cur = g.n > 0 ? g.ladder[g.n - 1] : 0;
-  $('.walk-txt', walk).textContent = `🏳️ Plantarse con ${fmtMoney(cur)}`;
+  const walkMine = isVoting && !!myVote && myVote.o === 4;
+  $('.walk-txt', walk).textContent = walkMine ? (myVote.c ? '🔒 Confirmado: plantarse' : '👆 Toca otra vez para plantarse') : `🏳️ Plantarse con ${fmtMoney(cur)}`;
   walk.disabled = !isVoting;
   walk.classList.toggle('hidden', !!g.comp);
   walk.classList.toggle('mine', !!myVote && myVote.o === 4 && isVoting);
@@ -902,25 +957,36 @@ function renderVotes(st) {
     for (const p of online) {
       const P = C.p[p.id];
       if (!P || !inPlay.has(p.id)) { stage.setSign(p.id, null, colorOf(p.av)); continue; }
-      if (st.phase === 'voting') { stage.setSign(p.id, P.c ? '✔' : null, colorOf(p.av)); stage.setAnim(p.id, P.c ? 'vote' : 'think'); }
-      else if (st.phase === 'locked') stage.setSign(p.id, '✔', colorOf(p.av));
+      if (st.phase === 'voting') {
+        stage.setSign(p.id, P.c ? '✔' : null, colorOf(p.av)); stage.setAnim(p.id, P.c ? 'vote' : 'think');
+        stage.setPodiumState?.(p.id, S.waitIds.includes(p.id) ? 'waiting' : P.c ? 'confirmed' : P.o != null ? 'voted' : 'idle');
+      } else if (st.phase === 'locked') stage.setSign(p.id, '✔', colorOf(p.av));
       else if (st.phase === 'reveal') {
         stage.setSign(p.id, P.o != null ? LETTERS[P.o] : '⏰', colorOf(p.av));
         stage.setAnim(p.id, P.res === 'ok' ? 'happy' : 'sad');
-      } else stage.setSign(p.id, null, colorOf(p.av));
+        stage.setPodiumState?.(p.id, P.res === 'ok' ? 'correct' : 'wrong');
+      } else { stage.setSign(p.id, null, colorOf(p.av)); if (st.phase === 'intro') stage.setPodiumState?.(p.id, 'idle'); }
     }
     return;
   }
   const showVotes = st.phase === 'voting' || st.phase === 'locked' || st.phase === 'reveal';
   const by = { 0: [], 1: [], 2: [], 3: [], 4: [] };
   if (showVotes) for (const p of online) { const v = g.votes[p.id]; if (v && by[v.o]) by[v.o].push(p); }
-  $$('.answer').forEach((b, i) => { $('.voters', b).innerHTML = by[i].map(p => imgThumb(p.av, p.name, 64)).join(''); });
-  $('#btn-walk .voters').innerHTML = by[4].map(p => imgThumb(p.av, p.name, 64)).join('');
+  const chip = p => { const v = g.votes[p.id]; return imgThumb(p.av, `${p.name}${v && v.c ? ' · confirmó' : ' · eligió, falta confirmar'}`, 64, v && v.c ? 'ok' : 'pending'); };
+  $$('.answer').forEach((b, i) => { $('.voters', b).innerHTML = by[i].map(chip).join(''); });
+  $('#btn-walk .voters').innerHTML = by[4].map(chip).join('');
   if (!stage) return;
   for (const p of online) {
     const v = showVotes ? g.votes[p.id] : null;
-    stage.setSign(p.id, v ? (v.o === 4 ? '🏳️' : LETTERS[v.o]) : null, colorOf(p.av));
-    if (st.phase === 'voting') stage.setAnim(p.id, v ? 'vote' : 'think');
+    stage.setSign(p.id, v ? (v.o === 4 ? '🏳️' : LETTERS[v.o]) + (v.c ? ' ✓' : '') : null, colorOf(p.av));
+    if (st.phase === 'voting') {
+      stage.setAnim(p.id, v ? 'vote' : 'think');
+      stage.setPodiumState?.(p.id, S.waitIds.includes(p.id) ? 'waiting' : v ? (v.c ? 'confirmed' : 'voted') : 'idle');
+    } else if (st.phase === 'reveal' && g.result !== 'retry' && g.answer != null) {
+      stage.setPodiumState?.(p.id, v && v.o === g.answer ? 'correct' : 'wrong');
+    } else if (st.phase === 'reveal' && g.result === 'retry') {
+      stage.setPodiumState?.(p.id, v && v.o === g.picked ? 'wrong' : 'idle');
+    } else if (st.phase === 'intro') stage.setPodiumState?.(p.id, 'idle');
   }
 }
 
@@ -936,10 +1002,10 @@ function renderStatus(st) {
       case 'intro': text = C.sd ? '⚔️ Muerte súbita: lee bien…' : '👀 Lee bien la pregunta…'; break;
       case 'voting':
         if (!g.playing) text = C.sd ? '⚔️ Muerte súbita entre los empatados' : 'Estás viendo la partida';
-        else if (P.c) text = '🔒 Fijada. Esperando a los demás…';
-        else if (P.o != null) text = `Elegiste la ${LETTERS[P.o]} · toca otra vez para fijarla`;
-        else text = 'Elige tu respuesta · toca otra vez para fijarla';
-        text += ` · ${ready}/${inPlay.length} listos`;
+        else if (P.c) text = '🔒 Confirmaste. Esperando a los demás…';
+        else if (P.o != null) text = `👆 Elegiste la ${LETTERS[P.o]}: tócala otra vez para confirmar`;
+        else text = 'Toca una respuesta y luego confírmala con otro toque';
+        text += ` · ${ready}/${inPlay.length} confirmados`;
         break;
       case 'locked': text = '🥁 Respuestas fijadas…'; break;
       case 'reveal': text = !P || !g.playing ? '' : { ok: '🎉 ¡Correcto!', bad: '😢 Incorrecto', timeout: '⏰ Sin tiempo' }[P.res] || ''; break;
@@ -955,11 +1021,11 @@ function renderStatus(st) {
   switch (st.phase) {
     case 'intro': text = '👀 Lean bien la pregunta…'; break;
     case 'voting': {
-      const voted = online.filter(p => g.votes[p.id]).length;
-      if (S.finalAt) text = '⏳ ¡Respuesta final en unos segundos!';
-      else if (v) text = v.c ? '🔒 Fijada. Esperando al equipo…' : `Votaste la ${v.o === 4 ? 'retirada' : LETTERS[v.o]} · toca otra vez para fijarla`;
-      else text = solo ? 'Elige tu respuesta · toca otra vez para fijarla' : 'Voten: gana la mayoría · empate: la que llegó primero';
-      if (!solo) text += ` · ${voted}/${online.length} votos`;
+      const confirmed = online.filter(p => g.votes[p.id] && g.votes[p.id].c).length;
+      if (v && v.c) text = solo ? '🔒 Confirmada' : '🔒 Confirmaste. Esperando al equipo…';
+      else if (v) text = `👆 Elegiste ${v.o === 4 ? 'plantarse' : 'la ' + LETTERS[v.o]}: tócala otra vez para confirmar`;
+      else text = solo ? 'Toca una respuesta y luego confírmala con otro toque' : 'Toca una respuesta y confírmala con otro toque · gana la mayoría';
+      if (!solo) text += ` · ${confirmed}/${online.length} confirmados`;
       break;
     }
     case 'locked': text = '🥁 Respuesta fijada…'; break;
@@ -999,14 +1065,15 @@ function renderOver(st) {
   const key = g.id + (isHost ? 'h' : 'g');
   if (S.overShown === key) return;
   S.overShown = key;
+  const ps = g.ps || {};
+  const ranked = [...g.roster].sort((a, b) => ((ps[b.id] || {}).ok || 0) - ((ps[a.id] || {}).ok || 0));
+  const medal = i => ['🥇', '🥈', '🥉'][i] || '🏅';
   const el = $('#over');
   el.innerHTML = `<div class="over-box card">
-    <p class="over-sub">${esc(sub[o.kind])}</p>
-    <h2 class="over-title">${titles[o.kind]}</h2>
-    <div class="over-prize">${fmtMoney(o.prize)}</div>
-    <p class="over-sub">Superaron ${o.level} de ${g.len} preguntas · ${g.correct} acierto(s)</p>
+    <div class="ob-head"><div><p class="over-sub">${esc(sub[o.kind])}</p><h2 class="over-title">${titles[o.kind]}</h2></div><div class="over-prize">${fmtMoney(o.prize)}</div></div>
+    <p class="over-sub">${esc(g.team || '')} · superaron ${o.level} de ${g.len} preguntas</p>
     ${ans}
-    <div class="team-row">${g.roster.map(p => `<figure>${imgThumb(p.av, p.name)}<figcaption>${esc(p.name)}</figcaption></figure>`).join('')}</div>
+    <div class="team-rank" aria-label="Aciertos de cada jugador">${ranked.map((p, i) => `<div class="tr-item ${p.id === me.id ? 'me' : ''}"><span class="tr-medal">${medal(i)}</span>${imgThumb(p.av, p.name, 64)}<span class="tr-name">${esc(p.name)}</span><span class="tr-ok">✓ ${(ps[p.id] || {}).ok || 0}</span></div>`).join('')}</div>
     <div class="unlocks">${S.recorded === g.id ? S.unlocks.map((u, i) => `<div class="unlock" style="animation-delay:${1.2 + i * 0.3}s">🎁 ¡Desbloqueaste ${esc(u.kind.toLowerCase())}: ${u.icon} ${esc(u.name)}!</div>`).join('') : ''}</div>
     <p class="fame-note" id="fame-note">${eligible ? '' : (g.custom ? 'Las partidas con preguntas personalizadas no entran al Salón de la fama.' : '')}</p>
     <div class="over-actions">
@@ -1078,7 +1145,102 @@ function hostOver(st) {
   }).catch(e => console.warn('Salón de la fama:', e));
 }
 
-// Reloj y cuenta atrás de «respuesta final».
+// ---- Frases rápidas: globo sobre el avatar + línea en el chat ----
+function showSay(player, text) {
+  if (stage) stage.say?.(player.id, text, colorOf(player.av));
+  addChat({ name: player.name, c: player.av.color, text: '🗨️ ' + text });
+  audio.sfx('chat');
+}
+function sendSay(k) {
+  const text = QUICK_PHRASES[k];
+  if (!text || !S.room || !S.state) return;
+  const now = Date.now();
+  if (now - S.lastSay < 1200) return;
+  S.lastSay = now;
+  S.room.send('say', { k });
+  const mine = S.state.players.find(x => x.id === me.id) || { id: me.id, name: me.name, av: me.av };
+  showSay(mine, text);
+}
+function initPhrases() {
+  const panel = $('#phrases');
+  panel.innerHTML = QUICK_PHRASES.map((t, k) => `<button type="button" class="chip" data-k="${k}" role="menuitem">${esc(t)}</button>`).join('');
+  panel.addEventListener('click', e => {
+    const b = e.target.closest('[data-k]');
+    if (!b) return;
+    sendSay(Number(b.dataset.k));
+    panel.classList.add('hidden');
+  });
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'say-btn';
+  btn.title = 'Frases rápidas';
+  btn.setAttribute('aria-label', 'Frases rápidas');
+  btn.textContent = '🗨️';
+  $('#reactions').prepend(btn);
+  btn.addEventListener('click', e => { e.stopPropagation(); panel.classList.toggle('hidden'); });
+  document.addEventListener('click', e => {
+    if (!panel.classList.contains('hidden') && !e.target.closest('#phrases') && !e.target.closest('.say-btn')) panel.classList.add('hidden');
+  });
+}
+
+// ---- «Todos esperan a…»: cuando la mayoría ya confirmó y falta alguien ----
+const WAIT_DELAY = 2500;
+function pendingConfirm(st) {
+  const g = st && st.game;
+  if (!g || st.phase !== 'voting') return [];
+  const online = st.players.filter(p => p.online);
+  let all, isDone;
+  if (g.comp) {
+    const C = g.comp;
+    all = online.filter(p => C.p[p.id] && (!C.sd || C.sd.includes(p.id)));
+    isDone = p => C.p[p.id].c;
+  } else {
+    all = online;
+    isDone = p => !!(g.votes[p.id] && g.votes[p.id].c);
+  }
+  const done = all.filter(isDone).length;
+  if (all.length < 2 || done === 0 || done === all.length) return [];
+  return all.filter(p => !isDone(p));
+}
+function updateWaiting(now) {
+  if (S.screen !== 'game') { if (S.waitKey) { S.waitKey = ''; clearWaiting(); } return; }
+  const pending = pendingConfirm(S.state);
+  const key = pending.map(p => p.id).join(',');
+  if (key !== S.waitKey) {
+    const wasShown = S.waitShown;
+    S.waitKey = key;
+    S.waitShown = false;
+    if (!key) { S.waitSince = 0; clearWaiting(); return; }
+    // si ya se mostraba y alguien confirmó, se actualiza al instante
+    S.waitSince = wasShown ? now - WAIT_DELAY : now;
+  }
+  if (key && !S.waitShown && now - S.waitSince >= WAIT_DELAY) { S.waitShown = true; showWaiting(pending); }
+}
+function showWaiting(pending) {
+  S.waitIds = pending.map(p => p.id);
+  const meWaiting = S.waitIds.includes(me.id);
+  const others = pending.filter(p => p.id !== me.id).map(p => p.name);
+  const list = n => n.length > 1 ? n.slice(0, -1).join(', ') + ' y ' + n[n.length - 1] : n[0];
+  const text = meWaiting
+    ? (others.length ? `⏳ Faltan tú y ${list(others)}: ¡confirmen!` : '⏳ ¡Todos te esperan! Toca otra vez tu respuesta para confirmar')
+    : (pending.length === 1 ? `⏳ ¡Todos esperan a ${pending[0].name}!` : `⏳ Esperando a ${list(pending.map(p => p.name))}`);
+  const el = $('#wait-banner');
+  el.textContent = text;
+  el.classList.toggle('me', meWaiting);
+  el.classList.remove('hidden');
+  if (meWaiting) { audio.sfx('tick'); try { navigator.vibrate && navigator.vibrate(140); } catch { /* sin vibración */ } }
+  if (stage) stage.focus?.(pending.length === 1 ? pending[0].id : null);
+  if (S.state && S.state.game) renderVotes(viewOf(S.state));
+}
+function clearWaiting() {
+  const had = S.waitIds.length;
+  S.waitIds = [];
+  $('#wait-banner').classList.add('hidden');
+  if (stage && had) stage.focus?.(null);
+  if (had && S.state && S.state.game && S.screen === 'game') renderVotes(viewOf(S.state));
+}
+
+// Reloj de la pregunta.
 function timerLoop() {
   if (S.screen === 'game' && S.state && S.state.game) {
     const now = performance.now();
@@ -1100,14 +1262,6 @@ function timerLoop() {
       timer.classList.remove('warn', 'danger');
       S.lastTick = -1;
     }
-    if (ph === 'voting' && S.finalAt) {
-      const f = Math.ceil(Math.max(0, S.finalAt - now) / 1000);
-      if (f !== S.lastFinal && f > 0) {
-        S.lastFinal = f;
-        audio.sfx('final');
-        $('#status-line').textContent = `⏳ Respuesta final en ${f}… (toquen otra vez su opción para fijarla ya)`;
-      }
-    } else S.lastFinal = -1;
   }
   requestAnimationFrame(timerLoop);
 }
@@ -1184,8 +1338,9 @@ function updateFraming() {
     stage.setFraming(0, 0);
   } else {
     const top = 84;
-    let bottom = $('#qa').getBoundingClientRect().top;
-    if (w < 1100) { const l = $('#lifelines').getBoundingClientRect(); if (l.height) bottom = Math.min(bottom, l.top); }
+    const ob = S.state && S.state.phase === 'over' ? $('#over:not(.hidden) .over-box') : null;
+    let bottom = ob ? ob.getBoundingClientRect().top : $('#qa').getBoundingClientRect().top;
+    if (!ob && w < 1100) { const l = $('#lifelines').getBoundingClientRect(); if (l.height) bottom = Math.min(bottom, l.top); }
     const center = (top + bottom) / 2;
     stage.setFraming(0, Math.max(0, Math.min(0.42, (h / 2 - center) / h)));
   }
@@ -1223,12 +1378,22 @@ function initChat() {
   });
 }
 function clearChat() { $('#chat-log').innerHTML = ''; }
+function initLobbyChatButton() {
+  const btn = $('#btn-chat-lobby');
+  btn.addEventListener('click', () => {
+    const c = $('#chat-slot-lobby');
+    c.classList.toggle('open');
+    btn.classList.remove('unread');
+    if (c.classList.contains('open')) $('#chat-input').focus();
+  });
+}
 function pushChatLi(li) {
   const log = $('#chat-log');
   log.appendChild(li);
   while (log.children.length > 120) log.firstChild.remove();
   log.scrollTop = log.scrollHeight;
   if (S.screen === 'game' && !$('#chat-slot-game').classList.contains('open')) $('#btn-chat')?.classList.add('unread');
+  if (S.screen === 'lobby' && !$('#chat-slot-lobby').classList.contains('open')) $('#btn-chat-lobby')?.classList.add('unread');
 }
 function addChat(m) {
   const li = document.createElement('li');
@@ -1273,7 +1438,7 @@ function openHowto() {
     <ul>
       <li>Cada pregunta trae 4 opciones (A, B, C, D). Todos votan y <b>gana la mayoría</b>.</li>
       <li>Si hay empate, gana la opción que llegó primero a ese número de votos.</li>
-      <li>Cuando todos votaron empieza la cuenta de «respuesta final». Toca otra vez tu opción para fijarla al instante.</li>
+      <li><b>Doble toque:</b> el primer toque elige tu respuesta y el segundo la confirma. Cuando todos confirman, se fija la respuesta del equipo. Si se acaba el tiempo, cuentan los votos que haya.</li>
       <li>También pueden votar <b>🏳️ Plantarse</b> para llevarse lo ganado hasta ahora.</li>
       <li>Atajos: teclas 1-4 o A-D.</li>
     </ul>
@@ -1281,7 +1446,7 @@ function openHowto() {
     <p>Si fallan, se llevan el premio del último punto seguro que hayan pasado. En «Todo o nada» no hay red.</p>
     <h3>Roles y comodines</h3>
     <ul>${Object.values(ROLES).map(r => `<li>${r.icon} <b>${r.name}</b> · ${r.power}: ${r.desc}${r.unlock ? ` <i class="muted">(se desbloquea: ${r.unlock.text})</i>` : ''}</li>`).join('')}</ul>
-    <p class="muted">Cada jugador elige un rol en la sala y solo él usa su comodín. Si son menos de 4, los comodines libres se reparten.</p>
+    <p class="muted">Cada jugador tiene un solo comodín: el de su rol, y solo él puede usarlo, una vez por partida. Si no eliges rol, te toca uno al azar.</p>
     <h3>Desbloqueos 🎁</h3>
     <p>Jugando desbloqueas estilos visuales, sombreros y roles. Si eres el anfitrión, tus amigos ven la partida con el estilo que tú elijas.</p>`);
 }
@@ -1458,7 +1623,10 @@ async function boot() {
   bank.load().then(() => { if (S.state && S.state.phase === 'lobby') renderLobby(S.state); });
   initHome();
   initChat();
+  initLobbyChatButton();
   initGameUI();
+  initPhrases();
+  setInterval(() => updateWaiting(performance.now()), 250);
   initModals();
   try { await Promise.race([document.fonts && document.fonts.ready, new Promise(r => setTimeout(r, 1500))]); } catch { /* ignore */ }
   goHome();
