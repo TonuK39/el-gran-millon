@@ -1106,6 +1106,7 @@ export class Stage {
     const hadBadge = !!(p.badge && p.badge.out == null);
     const hadGold = !!(p.gold && p.gold.out == null);
     const bub = p.bubble ? { text: p.bubble.text, color: p.bubble.color, t0: p.bubble.t0 } : null;
+    if (p.speak) { p.speak.parent?.remove(p.speak); p.speak.material.dispose(); p.speak = null; }
     if (p.avatar) disposeAvatar(p.avatar);
     disposeTree(p.root);
     p.root.clear();
@@ -1178,6 +1179,23 @@ export class Stage {
     if (!B) return;
     B.sp.parent?.remove(B.sp); B.sp.material.map.dispose(); B.sp.material.dispose();
     p.bubble = null;
+  }
+
+  // Indicador de chat de voz: un 🔊 que late junto a la cabeza mientras ese jugador habla.
+  setSpeaking(id, on) {
+    const p = this.podiums.find(x => x.id === id);
+    if (!p || !!p.speak === !!on) return;
+    if (on) {
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: emojiTex('🔊'), transparent: true, depthWrite: false }));
+      sp.position.set(0.9, POD[this.theme].top + 2.2, 0.25);
+      sp.scale.setScalar(0.5);
+      p.top.add(sp);
+      p.speak = sp;
+    } else {
+      p.speak.parent?.remove(p.speak);
+      p.speak.material.dispose();
+      p.speak = null;
+    }
   }
 
   // Acerca poco a poco la cámara del juego (plano 'wide') al podio de ese jugador; null vuelve al plano normal.
@@ -1542,6 +1560,11 @@ export class Stage {
         B.y += (M.top + (p.sign ? 3.32 : 2.8) - B.y) * (1 - Math.exp(-dt * 10));
         B.sp.position.y = B.y + Math.sin(t * 2.2 + p.phase) * 0.03;
       }
+    }
+    if (p.speak) {
+      const ss = 0.48 + Math.abs(Math.sin(t * 9 + p.phase)) * 0.14;
+      p.speak.scale.set(ss, ss, 1);
+      p.speak.material.opacity = appear;
     }
     const b = p.badge;
     if (b) {

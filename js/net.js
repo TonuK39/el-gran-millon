@@ -14,7 +14,7 @@ export function newCode() {
 }
 export const cleanCode = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
 
-const EVENTS = ['hello', 'state', 'custom', 'act', 'chat', 'react', 'kick', 'say'];
+const EVENTS = ['hello', 'state', 'custom', 'act', 'chat', 'react', 'kick', 'say', 'rtc'];
 
 export class Room {
   constructor(code, me, { onMembers, onMessage, onStatus }) {
@@ -27,6 +27,17 @@ export class Room {
     this.members = [];
     this.channel = null;
     this.closed = false;
+    this.meta = { voice: false, muted: false }; // estado del chat de voz, visible para todos por presencia
+  }
+
+  presencePayload() {
+    return { id: this.me.id, name: this.me.name, av: this.me.av, joinedAt: this.joinedAt, ...this.meta };
+  }
+
+  // Actualiza datos propios en la presencia (p. ej. si estoy en el chat de voz o silenciado).
+  async setMeta(patch) {
+    Object.assign(this.meta, patch);
+    if (this.channel && !this.closed) { try { await this.channel.track(this.presencePayload()); } catch { /* reintenta en el próximo cambio */ } }
   }
 
   connect(timeoutMs = 12000) {
@@ -42,7 +53,7 @@ export class Room {
           const metas = st[key];
           if (!metas || !metas.length) continue;
           const m = metas[metas.length - 1];
-          if (m && m.id) list.push({ id: m.id, name: m.name, av: m.av, joinedAt: m.joinedAt || 0 });
+          if (m && m.id) list.push({ id: m.id, name: m.name, av: m.av, joinedAt: m.joinedAt || 0, voice: !!m.voice, muted: !!m.muted });
         }
         list.sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : 1));
         this.members = list;
@@ -59,7 +70,7 @@ export class Room {
       ch.subscribe(async (status) => {
         this.onStatus(status);
         if (status === 'SUBSCRIBED') {
-          await ch.track({ id: this.me.id, name: this.me.name, av: this.me.av, joinedAt: this.joinedAt });
+          await ch.track(this.presencePayload());
           if (!settled) { settled = true; clearTimeout(timer); resolve(); }
         } else if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && !settled) {
           settled = true; clearTimeout(timer); reject(new Error(status));

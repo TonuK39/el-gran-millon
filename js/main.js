@@ -10,6 +10,7 @@ import { Engine, defaultSettings, newRoomState } from './engine.js';
 import { Stage } from './scene.js';
 import { AvatarStudio } from './avatar.js';
 import { audio } from './audio.js';
+import { Voice } from './voice.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -25,6 +26,9 @@ const bank = new Bank();
 const lobbyAd = new LobbyAd();
 let stage = null;
 let studio = null;
+let voice = null;
+const URLP = new URLSearchParams(location.search);
+const FAKE_MIC = URLP.has('debug') && URLP.has('fakemic');
 
 const S = {
   screen: 'home', room: null, engine: null, state: null, custom: { text: '', list: [] },
@@ -257,6 +261,8 @@ async function enterRoom(code, intent, opts = {}) {
     onMembers: list => onMembers(room, list),
     onMessage: (ev, p, from) => onMessage(room, ev, p, from),
   });
+  voice = new Voice({ meId: me.id, send: (ev, payload) => { if (S.room === room) room.send(ev, payload); }, onChange: renderVoice });
+  S.voiceSet = new Set();
   Object.assign(S, {
     room, state: null, engine: null, custom: { text: '', list: [] }, lastEv: 0, recorded: null, overShown: null,
     seenSentTo: null, hostMissingSince: 0, unlocks: [], settingsBuilt: null,
@@ -307,6 +313,8 @@ function waitForState(room, ms) {
 async function leaveRoom(silent = false) {
   const room = S.room;
   S.room = null;
+  if (voice && voice.on) { voice.leave(); duckMusic(false); }
+  closeVoicePanel();
   if (S.engine) { S.engine.destroy(); S.engine = null; }
   lobbyAd.stop();
   S.state = null;
@@ -338,6 +346,12 @@ function becomeHost(st) {
 
 function onMembers(room, list) {
   if (room !== S.room) return;
+  if (voice) voice.sync(list);
+  const now = new Set(list.filter(m => m.voice).map(m => m.id));
+  for (const m of list) if (now.has(m.id) && !S.voiceSet.has(m.id) && m.id !== me.id) addSys(`🎙️ ${m.name} entró al chat de voz.`);
+  for (const id of S.voiceSet) if (!now.has(id) && id !== me.id) { const m = list.find(x => x.id === id); if (m) addSys(`${m.name} salió del chat de voz.`); }
+  S.voiceSet = now;
+  renderVoice();
   if (S.engine) S.engine.syncMembers(membersWithMe(list));
   else if (S.state) checkHost();
 }
@@ -393,6 +407,9 @@ function onMessage(room, ev, p, from) {
       break;
     case 'react':
       if (REACTIONS.includes(p.e) && stage) { stage.react(from, p.e); audio.sfx('react'); }
+      break;
+    case 'rtc':
+      if (voice) voice.onSignal(from, p);
       break;
     case 'say': {
       const text = QUICK_PHRASES[p.k | 0];
@@ -459,6 +476,7 @@ function applyState(st) {
   }
   processEvents(st, prev);
   updateLobbyAd(st);
+  renderVoice();
 }
 
 function processEvents(st, prev) {
@@ -531,14 +549,15 @@ function renderLobby(st) {
     const p = online[i];
     if (!p) { slots.push(`<li class="player empty"><span class="thumb">➕</span><span class="p-info"><span class="p-name">Lugar libre</span></span></li>`); continue; }
     const R = p.role ? ROLES[p.role] : null;
-    slots.push(`<li class="player ${p.id === me.id ? 'me' : ''}">
+    slots.push(`<li class="player ${p.id === me.id ? 'me' : ''}" data-id="${esc(p.id)}">
       ${imgThumb(p.av, p.name)}
-      <div class="p-info"><div class="p-name">${esc(p.name)}${p.id === st.hostId ? ' <span class="crown" title="Anfitrión">👑</span>' : ''}</div>
+      <div class="p-info"><div class="p-name">${esc(p.name)}${p.id === st.hostId ? ' <span class="crown" title="Anfitrión">👑</span>' : ''} <span class="v-ico"></span></div>
       <div class="p-role">${R ? `${R.icon} ${R.power}` : 'Eligiendo rol…'}</div></div>
       ${isHost && p.id !== me.id ? `<button class="kick" data-kick="${esc(p.id)}" title="Sacar de la sala" aria-label="Sacar a ${esc(p.name)}">✖</button>` : ''}
     </li>`);
   }
   $('#lobby-list').innerHTML = slots.join('');
+  renderVoice();
   renderSettings(st, isHost);
   renderRoles(st);
   $('#btn-start').classList.toggle('hidden', !isHost);
@@ -1145,6 +1164,149 @@ function hostOver(st) {
   }).catch(e => console.warn('Salón de la fama:', e));
 }
 
+// ====================================================================
+// chat de voz
+// ====================================================================
+function duckMusic(on) {
+  const st = profile.settings;
+  S.ducked = !!on;
+  audio.setVolumes({ music: on ? st.music * 0.3 : st.music, sfx: on ? st.sfx * 0.75 : st.sfx });
+}
+function micErrorText(e) {
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError') return '🎧 No diste permiso al micrófono: estás en la voz solo escuchando. Puedes activarlo desde el candado junto a la dirección de la página.';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') return '🎧 No encontramos un micrófono: estás en la voz solo escuchando.';
+  return '🎧 No pudimos usar tu micrófono: estás solo escuchando. Si abriste el link desde WhatsApp o Instagram, ábrelo en Chrome o Safari.';
+}
+async function joinVoice() {
+  if (!S.room || !voice || voice.on || S.voiceJoining) return;
+  if (!Voice.supported()) { toast('Tu navegador no permite chat de voz. Usa Chrome, Edge, Firefox o Safari actualizados.', 5000); return; }
+  audio.unlock();
+  S.voiceJoining = true;
+  renderVoice();
+  const r = await voice.join({ fake: FAKE_MIC });
+  S.voiceJoining = false;
+  if (!S.room) { voice.leave(); return; }
+  await S.room.setMeta({ voice: true, muted: r.listenOnly });
+  duckMusic(true);
+  audio.sfx('join');
+  if (r.listenOnly) toast(micErrorText(r.error), 7000);
+  else toast('🎙️ Estás en el chat de voz. Con audífonos se escucha mejor y sin eco.', 4000);
+  renderVoice();
+}
+function leaveVoice() {
+  if (!voice || !voice.on) return;
+  voice.leave();
+  if (S.room) S.room.setMeta({ voice: false, muted: false });
+  duckMusic(false);
+  closeVoicePanel();
+  audio.sfx('leave');
+  renderVoice();
+}
+function toggleMute() {
+  if (!voice || !voice.on) return;
+  if (voice.listenOnly) { toast('No tienes un micrófono activo: estás solo escuchando.'); return; }
+  voice.setMuted(!voice.muted);
+  if (S.room) S.room.setMeta({ muted: voice.muted });
+  audio.sfx('click');
+}
+function onVoiceButton(e) {
+  e.stopPropagation();
+  if (!voice || !voice.on) { joinVoice(); openVoicePanel(); return; }
+  const panel = $('#voice-panel');
+  if (panel.classList.contains('hidden')) openVoicePanel(); else closeVoicePanel();
+}
+function openVoicePanel() { $('#voice-panel').classList.remove('hidden'); renderVoicePanel(); }
+function closeVoicePanel() { $('#voice-panel').classList.add('hidden'); }
+function voiceMembers() { return (S.room ? S.room.members : []).filter(m => m.voice); }
+
+function renderVoice() {
+  const on = !!(voice && voice.on);
+  const silent = on && (voice.muted || voice.listenOnly);
+  const n = voiceMembers().length;
+  const hud = $('#btn-voice');
+  const lob = $('#btn-voice-lobby');
+  for (const b of [hud, lob]) { b.classList.toggle('v-on', on && !silent); b.classList.toggle('v-muted', silent); }
+  hud.textContent = silent ? '🔇' : '🎙️';
+  hud.title = !on ? 'Unirse al chat de voz' : silent ? 'Chat de voz (silenciado)' : 'Chat de voz (te escuchan)';
+  lob.textContent = S.voiceJoining ? '🎙️ Conectando…'
+    : !on ? `🎙️ Unirse a la voz${n ? ` (${n} dentro)` : ''}`
+    : voice.listenOnly ? '🎧 En la voz · solo escuchas'
+    : voice.muted ? '🔇 En la voz · silenciado' : '🎙️ En la voz · te escuchan';
+  $('#voice-unlock').classList.toggle('hidden', !(on && voice.needsGesture));
+  const members = S.room ? S.room.members : [];
+  for (const li of $$('#lobby-list .player[data-id]')) {
+    const m = members.find(x => x.id === li.dataset.id);
+    const ico = $('.v-ico', li);
+    if (ico) { ico.textContent = m && m.voice ? (m.muted ? '🔇' : '🎙️') : ''; ico.title = m && m.voice ? 'En el chat de voz' : ''; }
+    li.classList.toggle('speaking', on && voice.isSpeaking(li.dataset.id));
+  }
+  if (stage) for (const m of members) stage.setSpeaking?.(m.id, on && voice.isSpeaking(m.id));
+  if (!$('#voice-panel').classList.contains('hidden')) renderVoicePanel();
+}
+
+function renderVoicePanel() {
+  const panel = $('#voice-panel');
+  if (!voice) return;
+  const on = voice.on;
+  const stTxt = { connecting: 'conectando…', reconnecting: 'reconectando…', failed: 'sin conexión', connected: '', closed: '' };
+  const rows = voiceMembers().map(m => {
+    const isMe = m.id === me.id;
+    const st = !on || isMe ? '' : stTxt[voice.peerState(m.id) || 'connecting'];
+    const pm = voice.peerMuted(m.id);
+    return `<li class="vp-row ${on && voice.isSpeaking(m.id) ? 'speaking' : ''}">${imgThumb(m.av, m.name, 64)}
+      <span class="vp-name">${esc(m.name)}${isMe ? ' (tú)' : ''}<small>${m.muted ? '🔇 silenciado' : '🎙️ micrófono abierto'}${st ? ' · ' + st : ''}</small></span>
+      <span class="vp-meter"><i data-mid="${esc(m.id)}"></i></span>
+      ${isMe || !on ? '<span></span>' : `<button type="button" class="icon-btn small" data-pmute="${esc(m.id)}" title="${pm ? 'Volver a escucharle' : 'Silenciar solo para mí'}">${pm ? '🔈' : '🔊'}</button>`}</li>`;
+  }).join('');
+  const failed = on && [...voice.peers.values()].some(x => x.state === 'failed');
+  panel.innerHTML = `<div class="vp-head"><b>🎙️ Chat de voz</b><button type="button" class="icon-btn small" data-vact="close" aria-label="Cerrar">✕</button></div>
+    ${on ? '' : '<p class="muted small">Habla con tu equipo mientras juegan. Funciona entre PC y celular.</p>'}
+    <ul class="vp-list">${rows || '<li class="muted small">Todavía no hay nadie en la voz.</li>'}</ul>
+    ${failed ? '<p class="vp-warn">⚠️ No pudimos conectar con alguien. Algunas redes de datos móviles bloquean la conexión directa: prueben con Wi-Fi.</p>' : ''}
+    <div class="vp-actions">${on
+      ? `<button type="button" class="btn btn-small" data-vact="mute">${voice.listenOnly ? '🎧 Solo escuchas' : voice.muted ? '🎙️ Activar micrófono' : '🔇 Silenciarme'}</button><button type="button" class="btn btn-small btn-ghost" data-vact="leave">Salir de la voz</button>`
+      : `<button type="button" class="btn btn-small btn-go" data-vact="join">${S.voiceJoining ? 'Conectando…' : '🎙️ Unirme'}</button>`}</div>
+    ${on ? '<p class="muted small vp-tip">Atajo: tecla M para silenciarte. 🎧 Con audífonos no hay eco.</p>' : ''}`;
+  updateVoiceMeters();
+}
+function updateVoiceMeters() {
+  if (!voice || !voice.on) return;
+  for (const i of $$('#voice-panel [data-mid]')) {
+    const id = i.dataset.mid;
+    const muted = id === me.id ? voice.muted : false;
+    i.style.width = muted ? '0%' : Math.min(100, Math.round(voice.level(id) * 900)) + '%';
+  }
+}
+function initVoiceUI() {
+  $('#btn-voice').addEventListener('click', onVoiceButton);
+  $('#btn-voice-lobby').addEventListener('click', onVoiceButton);
+  $('#voice-panel').addEventListener('click', e => {
+    e.stopPropagation();
+    const a = e.target.closest('[data-vact]');
+    const pm = e.target.closest('[data-pmute]');
+    if (a) {
+      const k = a.dataset.vact;
+      if (k === 'close') closeVoicePanel();
+      else if (k === 'mute') toggleMute();
+      else if (k === 'leave') leaveVoice();
+      else if (k === 'join') joinVoice();
+    } else if (pm && voice) voice.setPeerMuted(pm.dataset.pmute, !voice.peerMuted(pm.dataset.pmute));
+  });
+  document.addEventListener('click', e => {
+    const panel = $('#voice-panel');
+    if (!panel.classList.contains('hidden') && !e.target.closest('#voice-panel') && !e.target.closest('#btn-voice') && !e.target.closest('#btn-voice-lobby')) closeVoicePanel();
+  });
+  $('#voice-unlock').addEventListener('click', () => { if (voice) voice.resumeAudio(); });
+  window.addEventListener('pointerdown', () => { if (voice && voice.needsGesture) voice.resumeAudio(); });
+  document.addEventListener('keydown', e => {
+    if (e.key.toLowerCase() !== 'm' || !voice || !voice.on) return;
+    if (['INPUT', 'TEXTAREA'].includes(document.activeElement && document.activeElement.tagName)) return;
+    toggleMute();
+  });
+  setInterval(() => { if (!$('#voice-panel').classList.contains('hidden')) updateVoiceMeters(); }, 150);
+}
+
 // ---- Frases rápidas: globo sobre el avatar + línea en el chat ----
 function showSay(player, text) {
   if (stage) stage.say?.(player.id, text, colorOf(player.av));
@@ -1442,6 +1604,8 @@ function openHowto() {
       <li>También pueden votar <b>🏳️ Plantarse</b> para llevarse lo ganado hasta ahora.</li>
       <li>Atajos: teclas 1-4 o A-D.</li>
     </ul>
+    <h3>Chat de voz 🎙️</h3>
+    <p>En la sala o durante la partida toca 🎙️ para hablar con tu equipo, desde PC o celular. Toca otra vez para silenciarte o salir (atajo: tecla M). Con audífonos se escucha mejor y sin eco.</p>
     <h3>Puntos seguros 🛡️</h3>
     <p>Si fallan, se llevan el premio del último punto seguro que hayan pasado. En «Todo o nada» no hay red.</p>
     <h3>Roles y comodines</h3>
@@ -1531,7 +1695,7 @@ function openSettings() {
       <small class="muted">Si el juego va lento en tu celular, usa Baja.</small>
     </div>
     <label class="set-row" style="grid-template-columns:auto 1fr;align-items:center;display:grid;gap:8px"><input type="checkbox" id="s-motion" ${st.reduceMotion ? 'checked' : ''}> Reducir animaciones y destellos</label>`, box => {
-    const save = () => { saveProfile(); audio.setVolumes({ music: st.music, sfx: st.sfx }); };
+    const save = () => { saveProfile(); duckMusic(!!S.ducked); };
     $('#s-music', box).addEventListener('input', e => { st.music = Number(e.target.value); save(); });
     $('#s-sfx', box).addEventListener('input', e => { st.sfx = Number(e.target.value); save(); });
     $('#s-sfx', box).addEventListener('change', () => audio.sfx('coin'));
@@ -1615,7 +1779,7 @@ async function boot() {
     toast('Tu navegador no pudo iniciar los gráficos 3D. El juego funciona igual, pero sin escenario.', 6000);
   }
   try { studio = new AvatarStudio(); } catch (e) { console.error(e); }
-  if (new URLSearchParams(location.search).has('debug')) window.egm = { stage, S, me };
+  if (new URLSearchParams(location.search).has('debug')) window.egm = { stage, S, me, get voice() { return voice; } };
   audio.setVolumes({ music: profile.settings.music, sfx: profile.settings.sfx });
   const unlock = () => audio.unlock();
   window.addEventListener('pointerdown', unlock);
@@ -1626,6 +1790,7 @@ async function boot() {
   initLobbyChatButton();
   initGameUI();
   initPhrases();
+  initVoiceUI();
   setInterval(() => updateWaiting(performance.now()), 250);
   initModals();
   try { await Promise.race([document.fonts && document.fonts.ready, new Promise(r => setTimeout(r, 1500))]); } catch { /* ignore */ }

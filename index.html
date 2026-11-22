@@ -85,6 +85,7 @@
         <div class="invite">
           <div class="code-box">Sala <b id="room-code">-----</b></div>
           <button id="btn-copy" class="btn btn-small btn-alt">🔗 Invitar amigos</button>
+          <button id="btn-voice-lobby" class="btn btn-small voice-btn" type="button">🎙️ Unirse a la voz</button>
         </div>
       </div>
 
@@ -123,6 +124,7 @@
       </div>
       <div class="hud-right">
         <div class="level-pill" id="level-pill"></div>
+        <button class="icon-btn voice-hud" id="btn-voice" title="Chat de voz" aria-label="Chat de voz">🎙️</button>
         <button class="icon-btn" id="btn-ladder" title="Escalera de premios" aria-label="Escalera de premios">📈</button>
         <button class="icon-btn" data-open="settings" title="Ajustes" aria-label="Ajustes">⚙️</button>
         <button class="icon-btn" id="btn-exit" title="Salir" aria-label="Salir de la partida">🚪</button>
@@ -170,6 +172,9 @@
       <button class="btn btn-small" type="submit" aria-label="Enviar">➤</button>
     </form>
   </div>
+
+  <div id="voice-panel" class="voice-panel card hidden" role="dialog" aria-label="Chat de voz"></div>
+  <button id="voice-unlock" class="voice-unlock hidden" type="button">🔈 Toca aquí para escuchar la voz</button>
 
   <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-box card">

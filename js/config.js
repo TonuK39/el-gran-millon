@@ -4,6 +4,13 @@ export const SUPABASE_URL = 'https://bejwavjtinwxfhhxwepc.supabase.co';
 export const SUPABASE_KEY = 'sb_publishable_dm8Q2WACLEGgqhGVVe5cOQ_x7gJzw3j';
 
 export const MAX_PLAYERS = 4;
+
+// Servidores para que los navegadores se encuentren en el chat de voz (WebRTC).
+// STUN basta en la mayoría de redes; para datos móviles muy restrictivos hace falta un TURN.
+export const ICE_SERVERS = [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+];
 export const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 export const CATEGORIES = [
