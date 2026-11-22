@@ -1172,6 +1172,11 @@ function duckMusic(on) {
   S.ducked = !!on;
   audio.setVolumes({ music: on ? st.music * 0.3 : st.music, sfx: on ? st.sfx * 0.75 : st.sfx });
 }
+// La voz necesita internet y va directo entre navegadores: con Wi-Fi conecta casi siempre,
+// pero muchas redes de datos móviles bloquean la conexión directa.
+const isOffline = () => typeof navigator.onLine === 'boolean' && !navigator.onLine;
+const onCellular = () => { const c = navigator.connection; return !!(c && c.type === 'cellular'); };
+
 function micErrorText(e) {
   const n = e && e.name;
   if (n === 'NotAllowedError' || n === 'SecurityError') return '🎧 No diste permiso al micrófono: estás en la voz solo escuchando. Puedes activarlo desde el candado junto a la dirección de la página.';
@@ -1181,6 +1186,8 @@ function micErrorText(e) {
 async function joinVoice() {
   if (!S.room || !voice || voice.on || S.voiceJoining) return;
   if (!Voice.supported()) { toast('Tu navegador no permite chat de voz. Usa Chrome, Edge, Firefox o Safari actualizados.', 5000); return; }
+  if (isOffline()) { toast('📵 Sin conexión a internet no hay chat de voz. Conéctate y vuelve a intentarlo.', 5000); renderVoice(); return; }
+  if (onCellular()) toast('📶 Estás usando datos móviles: el chat de voz podría no conectarse. Para hablar, usa Wi-Fi.', 6500);
   audio.unlock();
   S.voiceJoining = true;
   renderVoice();
@@ -1230,6 +1237,7 @@ function renderVoice() {
   hud.textContent = silent ? '🔇' : '🎙️';
   hud.title = !on ? 'Unirse al chat de voz' : silent ? 'Chat de voz (silenciado)' : 'Chat de voz (te escuchan)';
   lob.textContent = S.voiceJoining ? '🎙️ Conectando…'
+    : !on && isOffline() ? '📵 Sin internet: no hay voz'
     : !on ? `🎙️ Unirse a la voz${n ? ` (${n} dentro)` : ''}`
     : voice.listenOnly ? '🎧 En la voz · solo escuchas'
     : voice.muted ? '🔇 En la voz · silenciado' : '🎙️ En la voz · te escuchan';
@@ -1263,7 +1271,10 @@ function renderVoicePanel() {
   panel.innerHTML = `<div class="vp-head"><b>🎙️ Chat de voz</b><button type="button" class="icon-btn small" data-vact="close" aria-label="Cerrar">✕</button></div>
     ${on ? '' : '<p class="muted small">Habla con tu equipo mientras juegan. Funciona entre PC y celular.</p>'}
     <ul class="vp-list">${rows || '<li class="muted small">Todavía no hay nadie en la voz.</li>'}</ul>
-    ${failed ? '<p class="vp-warn">⚠️ No pudimos conectar con alguien. Algunas redes de datos móviles bloquean la conexión directa: prueben con Wi-Fi.</p>' : ''}
+    ${isOffline() ? '<p class="vp-warn">📵 Sin conexión a internet: no hay chat de voz.</p>' : ''}
+    ${!isOffline() && onCellular() ? '<p class="vp-warn">📶 Estás con datos móviles: la voz podría no conectarse. Usa Wi-Fi.</p>' : ''}
+    ${failed ? '<p class="vp-warn">⚠️ No pudimos conectar con alguien. Muchas redes de datos móviles bloquean la voz: prueben con Wi-Fi.</p>' : ''}
+    <p class="vp-net">📶 La voz necesita internet y funciona con Wi-Fi. Con datos móviles puede no conectarse.</p>
     <div class="vp-actions">${on
       ? `<button type="button" class="btn btn-small" data-vact="mute">${voice.listenOnly ? '🎧 Solo escuchas' : voice.muted ? '🎙️ Activar micrófono' : '🔇 Silenciarme'}</button><button type="button" class="btn btn-small btn-ghost" data-vact="leave">Salir de la voz</button>`
       : `<button type="button" class="btn btn-small btn-go" data-vact="join">${S.voiceJoining ? 'Conectando…' : '🎙️ Unirme'}</button>`}</div>
@@ -1298,6 +1309,14 @@ function initVoiceUI() {
     if (!panel.classList.contains('hidden') && !e.target.closest('#voice-panel') && !e.target.closest('#btn-voice') && !e.target.closest('#btn-voice-lobby')) closeVoicePanel();
   });
   $('#voice-unlock').addEventListener('click', () => { if (voice) voice.resumeAudio(); });
+  window.addEventListener('offline', () => {
+    if (voice && voice.on) toast('📵 Se perdió la conexión a internet: el chat de voz se cortó.', 5000);
+    renderVoice();
+  });
+  window.addEventListener('online', () => {
+    if (voice && voice.on) toast('📶 Volvió la conexión. Si no escuchas a los demás, sal y vuelve a entrar a la voz.', 5500);
+    renderVoice();
+  });
   window.addEventListener('pointerdown', () => { if (voice && voice.needsGesture) voice.resumeAudio(); });
   document.addEventListener('keydown', e => {
     if (e.key.toLowerCase() !== 'm' || !voice || !voice.on) return;
@@ -1606,6 +1625,7 @@ function openHowto() {
     </ul>
     <h3>Chat de voz 🎙️</h3>
     <p>En la sala o durante la partida toca 🎙️ para hablar con tu equipo, desde PC o celular. Toca otra vez para silenciarte o salir (atajo: tecla M). Con audífonos se escucha mejor y sin eco.</p>
+    <p class="muted">📶 La voz necesita internet y funciona con Wi-Fi. Con datos móviles puede no conectarse; sin internet no hay voz.</p>
     <h3>Puntos seguros 🛡️</h3>
     <p>Si fallan, se llevan el premio del último punto seguro que hayan pasado. En «Todo o nada» no hay red.</p>
     <h3>Roles y comodines</h3>

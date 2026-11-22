@@ -702,3 +702,4 @@ body[data-phase="over"] #qa, body[data-phase="over"] #lifelines, body[data-phase
 .player .v-ico { font-size: 0.8rem; }
 .player.speaking { box-shadow: 0 0 0 2px var(--good), 0 0 16px color-mix(in srgb, var(--good) 45%, transparent); }
 .player.speaking img { animation: tap-bob 0.35s ease-in-out infinite alternate; }
+.vp-net { margin: 0; color: var(--muted); font-weight: 700; font-size: 0.78rem; line-height: 1.3; }
